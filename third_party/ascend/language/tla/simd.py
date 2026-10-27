@@ -20,19 +20,31 @@
 """
 SIMD vector-register primitives for the engram_fused_weight decode chains.
 
-Each op maps 1:1 onto an AVE dialect op (``ave.hir.*``) built through
-``ascend_ir.cc`` bindings:
+Primitives build AVE dialect ops (``ave.hir.*``) through ``cpp/tla_builder.cc``
+bindings; explicitly masked arithmetic also selects zero on inactive lanes:
 
 ============================  ==========================================
 API                           AVE op
 ============================  ==========================================
 ``vlds``                      ``ave.hir.vload``
 ``vsts``                      ``ave.hir.masked_store``
+``vsstb``                     ``ave.hir.store_with_stride``
 ``vextf``                     ``ave.hir.vextf``
 ``vintlv``                    ``ave.hir.vintlv``
 ``vbitcast``                  ``vector.bitcast``
 ``vmul``                      ``ave.hir.vmul`` (mask = ``ave.hir.pge <ALL>``)
+``vadd`` / ``vsub``           ``ave.hir.vadd`` / ``ave.hir.vsub``
+``vor`` / ``vxor``            ``ave.hir.vor`` / ``ave.hir.vxor``
+``vmins``                     ``ave.hir.vmins`` (vector-scalar min)
+``vmod`` / ``vdiv``           ``ave.hir.vmod`` / ``ave.hir.vdiv``
 ============================  ==========================================
+
+``vadd``/``vsub``/``vor``/``vxor``/``vmins`` accept an optional ``mask``
+(default all-true) and a predication ``mode`` (``MODE.ZEROING``, the
+default; ``MODE.MERGING`` is rejected until the backend exposes the
+``.m`` intrinsic variants).  ``vsstb`` writes a full register to UB one
+32-byte block at a time with consecutive blocks ``stride`` elements
+apart (compile-time stride, multiple of the 32B block size).
 
 The two supported decode chains (see ``TileKernels``
 ``quant/cast_back_asc.py`` / ``engram/engram_fused_weight_asc.py``):
@@ -46,6 +58,8 @@ type yields ``2048 // N`` lanes; conversions keep the lane count.  Dist/part/
 pp/pge strings are validated by :mod:`simd_semantic`.
 """
 
+import enum
+
 import triton.language as tl
 from .core import buffer, buffer_access
 from triton.language.core import builtin, constexpr, tensor, _unwrap_if_constexpr
@@ -53,16 +67,21 @@ from triton.language.core import builtin, constexpr, tensor, _unwrap_if_constexp
 from . import simd_semantic as ss
 
 __all__ = [
+    "MODE",
     "vlds",
     "vsts",
+    "vsstb",
     "vextf",
     "vintlv",
     "vdintlv",
     "vbitcast",
     "vmul",
     "vadd",
+    "vsub",
     "vdiv",
+    "vor",
     "vxor",
+    "vmins",
     "vmod",
     "vfma",
     "vsel",
@@ -84,6 +103,20 @@ __all__ = [
 ]
 
 
+class MODE(enum.Enum):
+    """Predication mode of a masked SIMD op.
+
+    ``ZEROING`` (default): masked-off lanes of the result are set to 0.
+
+    ``MERGING``: masked-off lanes keep the destination's previous value
+    (``.m`` variants).  Not yet implemented -- the AVE ops carry no mode
+    attribute and the HIVMAVEToAVEIntrin dispatch only emits ``.x``
+    variants; :func:`check_mask_mode` rejects it with guidance.
+    """
+
+    ZEROING = "zeroing"
+    MERGING = "merging"
+
 def _lanes_for(tag):
     """Full-register lane count; i64/u64 span 4096 bits (2x VL_BITS)."""
     bits = _ELEM_SPECS[tag]
@@ -91,8 +124,7 @@ def _lanes_for(tag):
         return 2 * ss.VL_BITS // 64
     return ss.lanes_for(bits)
 
-
-# Precise element tags accepted by the AVE builder (ascend_ir.cc
+# Precise element tags accepted by the AVE builder (cpp/tla_builder.cc
 # resolveSimdElementType).  Each tag maps to exactly one MLIR element type, so
 # the frontend's declared dtype and the handle's IR type stay identical.
 # ``fp8e4nv`` is the Triton spelling of the E4M3FN format (1-4-3, bias 7); the
@@ -108,16 +140,15 @@ _ELEM_SPECS = {
     "fp8e4nv": 8,
 }
 
+
 # short dtype name spellings accepted by bitcast(), resolved to canonical
 # triton dtype names.  Kept as strings (not dtype objects) so this module does
 # not evaluate tl.<dtype> at import time (extension/__init__ imports simd while
 # triton.language is still being initialized).
 _DTYPE_ALIASES = {
-    "f32": "fp32",
-    "fp32": "fp32",
+    "f32": "fp32", "fp32": "fp32",
     "bf16": "bf16",
-    "fp8e4nv": "fp8e4nv",
-    "float8e4nv": "fp8e4nv",
+    "fp8e4nv": "fp8e4nv", "float8e4nv": "fp8e4nv",
 }
 
 
@@ -130,29 +161,19 @@ def _elem_tag(dtype_):
     """
     name = str(dtype_)
     tag = {
-        "fp8e4nv": "fp8e4nv",
-        "float8e4nv": "fp8e4nv",
-        "fp8e4m3fn": "fp8e4nv",
-        "float8e4m3fn": "fp8e4nv",
-        "bf16": "bf16",
-        "bfloat16": "bf16",
-        "fp16": "f16",
-        "float16": "f16",
-        "fp32": "f32",
-        "float32": "f32",
-        "f32": "f32",
-        "int8": "i8",
-        "i8": "i8",
-        "int16": "i16",
-        "int32": "i32",
-        "int64": "i64",
-        "uint16": "i16",
-        "uint32": "i32",
-        "uint64": "i64",
+        "fp8e4nv": "fp8e4nv", "float8e4nv": "fp8e4nv",
+        "fp8e4m3fn": "fp8e4nv", "float8e4m3fn": "fp8e4nv",
+        "bf16": "bf16", "bfloat16": "bf16",
+        "fp16": "f16", "float16": "f16",
+        "fp32": "f32", "float32": "f32", "f32": "f32",
+        "int8": "i8", "i8": "i8", "uint8": "i8",
+        "int16": "i16", "int32": "i32", "int64": "i64",
+        "uint16": "i16", "uint32": "i32", "uint64": "i64",
     }.get(name)
     if tag is None:
-        raise ValueError(f"unsupported simd element dtype {dtype_}; supported: "
-                         f"i8/i16/i32/i64/bf16/f16/f32/fp8e4nv")
+        raise ValueError(
+            f"unsupported simd element dtype {dtype_}; supported: "
+            f"i8/i16/i32/i64/bf16/f16/f32/fp8e4nv")
     return tag
 
 
@@ -161,14 +182,16 @@ def _resolve_base_and_indices(ptr_or_buffer, offsets, _semantic):
     if isinstance(ptr_or_buffer, buffer):
         base = ptr_or_buffer.handle
     else:
-        raise TypeError("simd load/store expects a tla.buffer, "
-                        f"got {type(ptr_or_buffer).__name__}")
+        raise TypeError(
+            "simd load/store expects a tla.buffer, "
+            f"got {type(ptr_or_buffer).__name__}")
     indices = []
     for off in offsets:
         if isinstance(off, tensor):
             indices.append(off.handle)
         else:
-            off = _semantic.to_tensor(off if isinstance(off, constexpr) else constexpr(off))
+            off = _semantic.to_tensor(off if isinstance(off, constexpr)
+                                      else constexpr(off))
             indices.append(off.handle)
     return base, indices
 
@@ -176,6 +199,68 @@ def _resolve_base_and_indices(ptr_or_buffer, offsets, _semantic):
 def _all_mask(lanes, _semantic):
     handle = _semantic.builder.create_simd_pge("ALL", lanes)
     return tl.tensor(handle, tl.block_type(tl.int1, [lanes]))
+
+
+def _check_mode(mode, what):
+    """Resolve a predication mode via simd_semantic (ZEROING only)."""
+    return ss.check_mask_mode(_unwrap_if_constexpr(mode), what)
+
+
+def _check_mask(mask, lanes, what):
+    """Validate a user-supplied predicate tensor for a lanes-wide op."""
+    lanes = _unwrap_if_constexpr(lanes)
+    if (not isinstance(mask, tensor) or mask.dtype != tl.int1
+            or list(mask.shape) != [lanes]):
+        raise ValueError(
+            f"{what} mask must be an int1 tensor of {lanes} lanes, "
+            f"got {getattr(mask, 'type', type(mask).__name__)}")
+
+
+def _check_vector(src, what):
+    if not isinstance(src, tensor) or len(src.shape) != 1:
+        raise ValueError(f"{what} expects a one-dimensional vector register")
+    ss.check_total_bits(src.shape[0], _ELEM_SPECS[_elem_tag(src.dtype)], what)
+
+
+def _zero_inactive(handle, src, mask, _semantic):
+    """Express ZEROING in SSA instead of relying on inactive .x lanes."""
+    tag = _elem_tag(src.dtype)
+    scalar = _semantic.builder.create_simd_scalar(tag, 0.0)
+    zero = _semantic.builder.create_simd_vsplat(scalar, tag, src.shape[0])
+    return _semantic.builder.create_simd_vsel(mask.handle, handle, zero)
+
+
+# Element tags accepted by the binary/binary-scalar intrinsic dispatch
+# (HIVMAVEToAVEIntrin BinaryRegistry / BinaryVectorScalarRegistry).  i64 has
+# no dispatch slot for any binary op and fp8 none for add/sub/or/xor/mins.
+_BINARY_TAGS = frozenset(["i8", "i16", "i32", "bf16", "f16", "f32"])
+_VEC_SCALAR_TAGS = frozenset(["i8", "i16", "i32", "f16", "f32"])
+
+
+def _binary(kind, src0, src1, mask, mode, _semantic):
+    """Shared path of the masked elementwise binary ops."""
+    _check_mode(mode, kind)
+    _check_vector(src0, kind)
+    _check_vector(src1, kind)
+    if src0.type != src1.type:
+        raise ValueError(f"{kind} requires same-typed operands, "
+                         f"got {src0.type} and {src1.type}")
+    tag = _elem_tag(src0.dtype)
+    if tag not in _BINARY_TAGS:
+        raise ValueError(
+            f"{kind} does not support {src0.dtype} registers; supported: "
+            f"i8/i16/i32/bf16/f16/f32")
+    lanes = src0.shape[0]
+    explicit_mask = mask is not None
+    if mask is None:
+        mask = _all_mask(lanes, _semantic)
+    else:
+        _check_mask(mask, lanes, kind)
+    handle = _semantic.builder.create_simd_binary(kind, src0.handle,
+                                                  src1.handle, mask.handle)
+    if explicit_mask:
+        handle = _zero_inactive(handle, src0, mask, _semantic)
+    return tl.tensor(handle, src0.type)
 
 
 @builtin
@@ -245,6 +330,72 @@ def vsts(ptr, offsets_or_val, val=None, *, dist=None, mask=None, _semantic=None)
 
 
 @builtin
+def vsstb(src, dst, stride, mask=None, update=False, _semantic=None):
+    """
+    Strided masked store to UB (``ave.hir.store_with_stride`` ->
+    ``intr.hivm.vsstb.v{N}{dt}``, the vsstb "stride store with broadcast"
+    instruction).
+
+    The register is written one 32-byte block at a time, with consecutive
+    blocks landing ``stride`` elements apart in the destination buffer;
+    masked-off lanes are not written. The caller must provide storage for
+    every active lane's destination address. This operation does not itself
+    pack converted values or change their register layout.
+
+    :param src: vector register tensor to store (f32/f16/bf16/fp8/i8-i32;
+        i64 is not supported by the instruction)
+    :param dst: two-dimensional UB buffer, or ``ub[i, j]``. A bare buffer
+        starts at index [0, 0]. The current backend stride lowering requires
+        two indices.
+    :param stride: compile-time element distance between consecutive 32B
+        blocks; must be a positive multiple of the block size
+        (``256 // elem_bits`` elements).  For bank-conflict avoidance
+        prefer byte strides of ``(512*N + 32)`` (bishengir stride_align.md)
+    :param mask: predicate tensor; defaults to an all-true ``pge <ALL>``
+    :param update: post-update pointer return; not yet implemented (the
+        intrinsic's postUpdateEnable operand is hardcoded to 0 by the
+        current lowering)
+    """
+    if isinstance(dst, buffer_access):
+        dst, offsets = dst.buffer, list(dst.indices)
+    elif isinstance(dst, buffer):
+        offsets = [0] * len(dst.shape)
+    else:
+        raise TypeError(
+            "vsstb needs a subscripted buffer: vsstb(val, ub[i, ...], stride)")
+    if not isinstance(dst, buffer):
+        raise TypeError("simd.vsstb expects a tla.buffer")
+    if dst.space != "ub":
+        raise ValueError(f"vsstb targets UB buffers, got space {dst.space!r}")
+    if len(dst.shape) != 2 or len(offsets) != 2:
+        raise ValueError(
+            "vsstb currently requires a two-dimensional UB buffer and two indices")
+    update = _unwrap_if_constexpr(update)
+    if type(update) is not bool:
+        raise ValueError("vsstb update must be a compile-time bool")
+    if update:
+        raise NotImplementedError(
+            "vsstb update=True (post-update pointer return) is not "
+            "supported yet: the lowering hardcodes postUpdateEnable=0 and "
+            "the AVE op has no result value")
+    _check_vector(src, "vsstb")
+    if src.dtype != dst.dtype:
+        raise ValueError("vsstb source and destination element dtypes must match")
+    tag = _elem_tag(src.dtype)
+    if tag == "i64":
+        raise ValueError("vsstb does not support i64 registers")
+    stride = ss.check_vsstb_stride(_unwrap_if_constexpr(stride),
+                                   _ELEM_SPECS[tag])
+    if mask is None:
+        mask = _all_mask(src.shape[0], _semantic)
+    else:
+        _check_mask(mask, src.shape[0], "vsstb")
+    base, indices = _resolve_base_and_indices(dst, offsets, _semantic)
+    _semantic.builder.create_simd_vsstb(base, indices, stride, src.handle,
+                                        mask.handle)
+
+
+@builtin
 def vextf(src, target_dtype, mask=None, part="part_even", _semantic=None) -> tensor:
     """
     Widening float conversion (``ave.hir.vextf``), e.g. bf16/f8e4m3fn -> f32.
@@ -265,7 +416,8 @@ def vextf(src, target_dtype, mask=None, part="part_even", _semantic=None) -> ten
     out_lanes = ss.lanes_for(_ELEM_SPECS[out_tag])
     if mask is None:
         mask = _all_mask(out_lanes, _semantic)
-    handle = _semantic.builder.create_simd_vcvt("vextf", src.handle, mask.handle, out_tag, part)
+    handle = _semantic.builder.create_simd_vcvt("vextf", src.handle,
+                                                mask.handle, out_tag, part)
     return tl.tensor(handle, tl.block_type(target_dtype, [out_lanes]))
 
 
@@ -313,10 +465,12 @@ def vbitcast(src, dtype_str, _semantic=None) -> tensor:
     out_bits = _ELEM_SPECS[out_tag]
     total_bits = src.shape[0] * src_bits
     if total_bits % out_bits != 0:
-        raise ValueError(f"bitcast {src.shape[0]}x{src_bits} bits does not divide {out_bits}")
+        raise ValueError(
+            f"bitcast {src.shape[0]}x{src_bits} bits does not divide {out_bits}")
     out_lanes = total_bits // out_bits
     ss.check_total_bits(out_lanes, out_bits, "bitcast result")
-    handle = _semantic.builder.create_simd_bitcast(src.handle, out_tag, out_lanes)
+    handle = _semantic.builder.create_simd_bitcast(src.handle, out_tag,
+                                                   out_lanes)
     return tl.tensor(handle, tl.block_type(target, [out_lanes]))
 
 
@@ -331,23 +485,46 @@ def vmul(lhs, rhs, _semantic=None) -> tensor:
                          f"got {lhs.type} and {rhs.type}")
     lanes = lhs.shape[0]
     mask = _all_mask(lanes, _semantic)
-    handle = _semantic.builder.create_simd_binary("mul", lhs.handle, rhs.handle, mask.handle)
+    handle = _semantic.builder.create_simd_binary("mul", lhs.handle,
+                                                  rhs.handle, mask.handle)
     return tl.tensor(handle, lhs.type)
 
 
 @builtin
-def vadd(lhs, rhs, _semantic=None) -> tensor:
+def vadd(src0, src1, mask=None, mode=MODE.ZEROING, _semantic=None) -> tensor:
     """
-    Elementwise vector add (``ave.hir.vadd``) under an all-true
-    ``ave.hir.pge <ALL>`` mask.
+    Elementwise vector add (``ave.hir.vadd`` -> ``hivm.vadd.{s,u}.x``).
+
+    :param src0: left vector register tensor
+    :param src1: right vector register tensor (same type as ``src0``)
+    :param mask: predicate tensor; defaults to an all-true ``pge <ALL>``
+    :param mode: predication mode; only ``MODE.ZEROING`` is supported
     """
-    if lhs.type != rhs.type:
-        raise ValueError("add requires same-typed operands, "
-                         f"got {lhs.type} and {rhs.type}")
-    lanes = lhs.shape[0]
-    mask = _all_mask(lanes, _semantic)
-    handle = _semantic.builder.create_simd_binary("add", lhs.handle, rhs.handle, mask.handle)
-    return tl.tensor(handle, lhs.type)
+    return _binary("add", src0, src1, mask, mode, _semantic)
+
+
+@builtin
+def vsub(src0, src1, mask=None, mode=MODE.ZEROING, _semantic=None) -> tensor:
+    """
+    Elementwise vector subtract (``ave.hir.vsub`` -> ``hivm.vsub.{s,u}.x``).
+
+    :param src0: left vector register tensor
+    :param src1: right vector register tensor (same type as ``src0``)
+    :param mask: predicate tensor; defaults to an all-true ``pge <ALL>``
+    :param mode: predication mode; only ``MODE.ZEROING`` is supported
+    """
+    return _binary("sub", src0, src1, mask, mode, _semantic)
+
+
+@builtin
+def vor(src0, src1, mask=None, mode=MODE.ZEROING, _semantic=None) -> tensor:
+    """
+    Elementwise bitwise OR (``ave.hir.vor`` -> ``hivm.vor.x``).
+
+    Bits are combined without converting the element dtype. This operation
+    does not guarantee zero padding of values produced by ``vtruncf``.
+    """
+    return _binary("or", src0, src1, mask, mode, _semantic)
 
 
 @builtin
@@ -361,22 +538,80 @@ def vdiv(lhs, rhs, _semantic=None) -> tensor:
                          f"got {lhs.type} and {rhs.type}")
     lanes = lhs.shape[0]
     mask = _all_mask(lanes, _semantic)
-    handle = _semantic.builder.create_simd_binary("div", lhs.handle, rhs.handle, mask.handle)
+    handle = _semantic.builder.create_simd_binary("div", lhs.handle,
+                                                  rhs.handle, mask.handle)
     return tl.tensor(handle, lhs.type)
 
 
 @builtin
-def vxor(lhs, rhs, _semantic=None) -> tensor:
+def vxor(src0, src1, mask=None, mode=MODE.ZEROING, _semantic=None) -> tensor:
     """
-    Elementwise bitwise XOR (``ave.hir.vxor``) under an all-true mask.
+    Elementwise bitwise XOR (``ave.hir.vxor`` -> ``hivm.vxor.x``).
+
+    :param src0: left vector register tensor
+    :param src1: right vector register tensor (same type as ``src0``)
+    :param mask: predicate tensor; defaults to an all-true ``pge <ALL>``
+    :param mode: predication mode; only ``MODE.ZEROING`` is supported
     """
-    if lhs.type != rhs.type:
-        raise ValueError("xor requires same-typed operands, "
-                         f"got {lhs.type} and {rhs.type}")
-    lanes = lhs.shape[0]
-    mask = _all_mask(lanes, _semantic)
-    handle = _semantic.builder.create_simd_binary("xor", lhs.handle, rhs.handle, mask.handle)
-    return tl.tensor(handle, lhs.type)
+    return _binary("xor", src0, src1, mask, mode, _semantic)
+
+
+@builtin
+def vmins(src, scalar, mask=None, mode=MODE.ZEROING, _semantic=None) -> tensor:
+    """
+    Elementwise min with a scalar (``ave.hir.vmins`` ->
+    ``hivm.vmins.{s,u}.x``): ``out[i] = min(src[i], scalar)``.
+
+    :param src: vector register tensor (f16/f32 and signed/unsigned 8/16/32-bit
+        integers; bf16 and fp8
+        have no vec-scalar intrinsic -- splat the scalar and use
+        elementwise min instead)
+    :param scalar: scalar of the same dtype as ``src``'s elements; a
+        Python/constexpr number or a scalar tensor
+    :param mask: predicate tensor; defaults to an all-true ``pge <ALL>``
+    :param mode: predication mode; only ``MODE.ZEROING`` is supported
+    """
+    _check_mode(mode, "vmins")
+    tag = _elem_tag(src.dtype)
+    if tag not in _VEC_SCALAR_TAGS:
+        raise ValueError(
+            f"vmins does not support {src.dtype} registers; supported: "
+            f"i8/i16/i32/f16/f32 (bf16/fp8: use vsplat + elementwise min)")
+    _check_vector(src, "vmins")
+    lanes = src.shape[0]
+    explicit_mask = mask is not None
+    if isinstance(scalar, tensor):
+        if scalar.shape:
+            raise ValueError("vmins scalar must be a scalar tensor, not a vector")
+        if scalar.dtype != src.dtype:
+            raise ValueError(
+                f"vmins scalar dtype {scalar.dtype} must match the vector "
+                f"element dtype {src.dtype}")
+        scalar_handle = scalar.handle
+    else:
+        scalar = _unwrap_if_constexpr(scalar)
+        if isinstance(scalar, bool) or not isinstance(scalar, (int, float)):
+            raise TypeError(
+                f"vmins scalar must be a number, a constexpr, or a scalar "
+                f"tensor of {src.dtype}, got {type(scalar).__name__}")
+        if src.dtype.is_int():
+            bits = _ELEM_SPECS[tag]
+            lower = 0 if src.dtype.is_int_unsigned() else -(1 << (bits - 1))
+            upper = (1 << bits) - 1 if src.dtype.is_int_unsigned() else (1 << (bits - 1)) - 1
+            if type(scalar) is not int or not lower <= scalar <= upper:
+                raise ValueError(f"vmins scalar must be an integer representable as {src.dtype}")
+        scalar_handle = _semantic.builder.create_simd_scalar(tag,
+                                                             float(scalar))
+    if mask is None:
+        mask = _all_mask(lanes, _semantic)
+    else:
+        _check_mask(mask, lanes, "vmins")
+    handle = _semantic.builder.create_simd_binary_scalar(
+        "umins" if src.dtype.is_int_unsigned() else "mins",
+        src.handle, scalar_handle, mask.handle)
+    if explicit_mask:
+        handle = _zero_inactive(handle, src, mask, _semantic)
+    return tl.tensor(handle, src.type)
 
 
 @builtin
@@ -389,7 +624,8 @@ def vmod(lhs, rhs, _semantic=None) -> tensor:
                          f"got {lhs.type} and {rhs.type}")
     lanes = lhs.shape[0]
     mask = _all_mask(lanes, _semantic)
-    handle = _semantic.builder.create_simd_binary("mod", lhs.handle, rhs.handle, mask.handle)
+    handle = _semantic.builder.create_simd_binary("mod", lhs.handle,
+                                                  rhs.handle, mask.handle)
     return tl.tensor(handle, lhs.type)
 
 
@@ -403,7 +639,8 @@ def vfma(acc, lhs, rhs, _semantic=None) -> tensor:
                          f"got {acc.type}, {lhs.type}, {rhs.type}")
     lanes = acc.shape[0]
     mask = _all_mask(lanes, _semantic)
-    handle = _semantic.builder.create_simd_vfma(acc.handle, lhs.handle, rhs.handle, mask.handle)
+    handle = _semantic.builder.create_simd_vfma(acc.handle, lhs.handle,
+                                                rhs.handle, mask.handle)
     return tl.tensor(handle, acc.type)
 
 
@@ -415,7 +652,8 @@ def vsel(mask, true_val, false_val, _semantic=None) -> tensor:
     if true_val.type != false_val.type:
         raise ValueError("select requires same-typed value operands, "
                          f"got {true_val.type} and {false_val.type}")
-    handle = _semantic.builder.create_simd_vsel(mask.handle, true_val.handle, false_val.handle)
+    handle = _semantic.builder.create_simd_vsel(mask.handle, true_val.handle,
+                                                false_val.handle)
     return tl.tensor(handle, true_val.type)
 
 
@@ -471,13 +709,15 @@ def vcmp(lhs, rhs, cmp_type, _semantic=None) -> tensor:
     cmp_type = _unwrap_if_constexpr(cmp_type)
     cmp_type = str(cmp_type).upper()
     if cmp_type not in ("EQ", "NE", "GT", "GE", "LT", "LE"):
-        raise ValueError(f"cmp_type must be eq/ne/gt/ge/lt/le, got {cmp_type!r}")
+        raise ValueError(
+            f"cmp_type must be eq/ne/gt/ge/lt/le, got {cmp_type!r}")
     if lhs.type != rhs.type:
         raise ValueError("vcmp requires same-typed operands, "
                          f"got {lhs.type} and {rhs.type}")
     lanes = lhs.shape[0]
     mask = _all_mask(lanes, _semantic)
-    handle = _semantic.builder.create_simd_vcmp(cmp_type, lhs.handle, rhs.handle, mask.handle)
+    handle = _semantic.builder.create_simd_vcmp(cmp_type, lhs.handle,
+                                                rhs.handle, mask.handle)
     return tl.tensor(handle, tl.block_type(tl.int1, [lanes]))
 
 
@@ -491,7 +731,8 @@ def vbroadcast(src, low=True, _semantic=None) -> tensor:
     """
     lanes = src.shape[0]
     mask = _all_mask(lanes, _semantic)
-    handle = _semantic.builder.create_simd_vbroadcast(src.handle, mask.handle, bool(low))
+    handle = _semantic.builder.create_simd_vbroadcast(src.handle, mask.handle,
+                                                      bool(low))
     return tl.tensor(handle, src.type)
 
 
@@ -532,7 +773,8 @@ def vtruncf(src, target_dtype, mask=None, part="part_even", _semantic=None) -> t
     out_lanes = src.shape[0] * src_bits // out_bits
     if mask is None:
         mask = _all_mask(src.shape[0], _semantic)
-    handle = _semantic.builder.create_simd_vcvt("truncf", src.handle, mask.handle, out_tag, part)
+    handle = _semantic.builder.create_simd_vcvt("truncf", src.handle,
+                                                mask.handle, out_tag, part)
     return tl.tensor(handle, tl.block_type(target_dtype, [out_lanes]))
 
 
@@ -584,12 +826,14 @@ def _reduce_across(regs, kind, _semantic):
     acc = regs[0]
     for r in regs[1:]:
         if acc.type != r.type:
-            raise ValueError(f"{kind}-across requires same-typed registers, "
-                             f"got {acc.type} and {r.type}")
+            raise ValueError(
+                f"{kind}-across requires same-typed registers, "
+                f"got {acc.type} and {r.type}")
         lanes = acc.shape[0]
         mask = _all_mask(lanes, _semantic)
         kind_op = ("max" if kind == "max" else "min")
-        handle = _semantic.builder.create_simd_binary(kind_op, acc.handle, r.handle, mask.handle)
+        handle = _semantic.builder.create_simd_binary(kind_op, acc.handle,
+                                                      r.handle, mask.handle)
         acc = tl.tensor(handle, acc.type)
     reduced = vreduce(acc, kind, _semantic=_semantic)
     return vbroadcast(reduced, low=True, _semantic=_semantic)
@@ -633,9 +877,11 @@ def vci(base, _semantic=None) -> tensor:
         base_handle = base.handle
     else:
         base = _unwrap_if_constexpr(base)
-        base_handle = _semantic.builder.create_simd_scalar("i32", float(base))
+        base_handle = _semantic.builder.create_simd_scalar(
+            "i32", float(base))
     lanes = _lanes_for("i32")
-    handle = _semantic.builder.create_simd_vci(base_handle, "i32", lanes, False)
+    handle = _semantic.builder.create_simd_vci(base_handle, "i32", lanes,
+                                               False)
     return tl.tensor(handle, tl.block_type(tl.int32, [lanes]))
 
 

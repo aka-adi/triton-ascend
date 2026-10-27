@@ -197,6 +197,14 @@ void init_tla_builder(py::module &&m) {
               return self.create<hivmave::VFAddOp>(resTy, lhs, rhs, mask)
                   .getResult();
             }
+            if (kind == "sub") {
+              return self.create<hivmave::VFSubOp>(resTy, lhs, rhs, mask)
+                  .getResult();
+            }
+            if (kind == "or") {
+              return self.create<hivmave::VFOrOp>(resTy, lhs, rhs, mask)
+                  .getResult();
+            }
             if (kind == "div") {
               return self.create<hivmave::VFDivOp>(resTy, lhs, rhs, mask)
                   .getResult();
@@ -454,6 +462,41 @@ void init_tla_builder(py::module &&m) {
             return op.getResult();
           },
           py::arg("src"), py::arg("out_elem_tag"), py::arg("out_lanes"))
+      .def(
+          "create_simd_binary_scalar",
+          [](TLABuilder &self, std::string &kind, Value &vec, Value &scalar,
+             Value &mask) -> Value {
+            auto resTy = vec.getType();
+            if (kind == "mins") {
+              return self.create<hivmave::VFMinsOp>(resTy, vec, scalar, mask)
+                  .getResult();
+            }
+            if (kind == "umins") {
+              return self.create<hivmave::VMinsUIOp>(resTy, vec, scalar, mask)
+                  .getResult();
+            }
+            throw std::invalid_argument("unknown vec-scalar kind: " + kind);
+          },
+          py::arg("kind"), py::arg("vec"), py::arg("scalar"), py::arg("mask"))
+      .def(
+          "create_simd_vsstb",
+          [](TLABuilder &self, Value &ptr, std::vector<Value> &indices,
+             int64_t stride, Value &val, Value &mask) -> void {
+            auto &builder = self.getBuilder();
+            auto loc = self.getLastLoc();
+            // The HIVMAVEToAVEIntrin lowering resolves the stride from an
+            // arith.constant index (HIVMStoreStrideOpLowering), so the
+            // frontend must pass a compile-time element stride; materialize
+            // it here. Stride is measured in elements, with a 32B-block
+            // granularity (a multiple of 256/elem_bits elements).
+            auto strideVal = builder.create<arith::ConstantOp>(
+                loc, builder.getIndexAttr(stride));
+            auto indicesIdx = toIndexValues(self, indices);
+            builder.create<hivmave::VFStoreWithStrideOp>(
+                loc, ptr, ValueRange(indicesIdx), strideVal, mask, val);
+          },
+          py::arg("ptr"), py::arg("indices"), py::arg("stride"), py::arg("val"),
+          py::arg("mask"))
       .def("create_tla_buffer_type",
            [](TLABuilder &self, const std::vector<int64_t> &shape,
               Type elementType, const std::string &space,
@@ -551,8 +594,9 @@ void init_tla_builder(py::module &&m) {
            })
       // memref.collapse_shape / expand_shape materialization (see
       // createReshapeOp above for the reassociation plumbing).
-      .def("create_tla_collapse_shape", &createReshapeOp<memref::CollapseShapeOp>,
-           py::arg("source"), py::arg("result_type"), py::arg("reassociation"))
+      .def("create_tla_collapse_shape",
+           &createReshapeOp<memref::CollapseShapeOp>, py::arg("source"),
+           py::arg("result_type"), py::arg("reassociation"))
       .def("create_tla_expand_shape", &createReshapeOp<memref::ExpandShapeOp>,
            py::arg("source"), py::arg("result_type"), py::arg("reassociation"))
       .def("create_hivm_load",
