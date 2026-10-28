@@ -30,7 +30,7 @@ Exports: ``alloc_buffer``/``alloc`` (on-chip buffer + versions),
 ``simd`` (vector-register ops), ``annotate_buffer_versions``.
 """
 
-from .core import buffer, buffer_type
+from .core import buffer, buffer_type, vector, vector_type
 from .scope import scope
 from .alloc import alloc_buffer, alloc
 from .copy import copy
@@ -50,6 +50,8 @@ from . import cube
 __all__ = [
     "buffer",
     "buffer_type",
+    "vector",
+    "vector_type",
 
     # buffer alloc / copy / view
     "alloc_buffer",

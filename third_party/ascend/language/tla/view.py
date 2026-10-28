@@ -151,10 +151,8 @@ def reshape(src, shape, _semantic=None):
     dst_ty = ty.to_ir(b)
     handle = src.handle
     if len(src.shape) > 1:  # flatten to 1-D
-        flat_ty = buffer_type((numel,), src.dtype, src.space).to_ir(b)
-        handle = b.create_tla_collapse_shape(
-            handle, flat_ty, [list(range(len(src.shape)))])
+        flat_ty = buffer_type((numel, ), src.dtype, src.space).to_ir(b)
+        handle = b.create_tla_collapse_shape(handle, flat_ty, [list(range(len(src.shape)))])
     if len(sizes) > 1:  # unflatten from 1-D to the target shape
-        handle = b.create_tla_expand_shape(
-            handle, dst_ty, [list(range(len(sizes)))])
+        handle = b.create_tla_expand_shape(handle, dst_ty, [list(range(len(sizes)))])
     return buffer(handle, ty)

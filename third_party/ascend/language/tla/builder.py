@@ -40,6 +40,7 @@ def setup_unified_builder(main_builder, ascend_builder):
     main_builder._ascend_builder = ascend_builder
     ascend_methods = [
         'create_tla_buffer_type',
+        'create_tla_vector_type',
         'create_tla_alloc',
         'create_tla_bind',
         'create_tla_subview',

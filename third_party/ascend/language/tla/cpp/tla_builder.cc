@@ -65,8 +65,7 @@ namespace {
 Type resolveSimdElementType(MLIRContext *ctx, const py::object &elem) {
   if (!py::isinstance<py::str>(elem)) {
     throw std::invalid_argument(
-        "simd element spec must be a tag string: i8 / i16 / i32 / i64 / bf16 / "
-        "f16 / f32 / fp8e4nv / fp8e5");
+        "simd element spec must be a tag string: i8 / bf16 / f32 / fp8e4nv / fp8e5");
   }
   const std::string tag = elem.cast<std::string>();
   if (tag == "i8")
@@ -88,8 +87,7 @@ Type resolveSimdElementType(MLIRContext *ctx, const py::object &elem) {
   if (tag == "fp8e5")
     return Float8E5M2Type::get(ctx);
   throw std::invalid_argument("unknown simd element tag \"" + tag +
-                              "\"; expected i8 / i16 / i32 / i64 / bf16 / f16 "
-                              "/ f32 / fp8e4nv / fp8e5");
+                              "\"; expected i8 / bf16 / f32 / fp8e4nv / fp8e5");
 }
 
 // vload/masked_store indices must be index-typed.
@@ -149,6 +147,15 @@ void init_tla_builder(py::module &&m) {
       .def(py::init<MLIRContext *, std::string, std::string>(),
            py::arg("context"), py::arg("target") = "",
            py::arg("compile_mode") = "simd")
+      .def(
+          "create_tla_vector_type",
+          [](TLABuilder &, int64_t lanes, Type elementType) -> Type {
+            if (lanes <= 0 || !elementType.isIntOrFloat())
+              throw std::invalid_argument("vector requires positive lanes and "
+                                          "an integer or float element type");
+            return VectorType::get({lanes}, elementType);
+          },
+          py::arg("lanes"), py::arg("element_type"))
       // SIMD vector-register ops (AVE dialect, ave.hir.*).
       .def(
           "create_simd_vlds",
@@ -489,11 +496,6 @@ void init_tla_builder(py::module &&m) {
              int64_t stride, Value &val, Value &mask) -> void {
             auto &builder = self.getBuilder();
             auto loc = self.getLastLoc();
-            // The HIVMAVEToAVEIntrin lowering resolves the stride from an
-            // arith.constant index (HIVMStoreStrideOpLowering), so the
-            // frontend must pass a compile-time element stride; materialize
-            // it here. Stride is measured in elements, with a 32B-block
-            // granularity (a multiple of 256/elem_bits elements).
             auto strideVal = builder.create<arith::ConstantOp>(
                 loc, builder.getIndexAttr(stride));
             auto indicesIdx = toIndexValues(self, indices);

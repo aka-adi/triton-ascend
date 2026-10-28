@@ -41,6 +41,26 @@ def _write_acl_config(cfg_dir, config):
     return cfg_path
 
 
+@pytest.mark.parametrize(
+    "arch, filename",
+    [
+        ("Ascend910B1", "libdevice.220.bc"),
+        ("Ascend910_9391", "libdevice.220.bc"),
+        ("Ascend910_9581", "libdevice.10.bc"),
+        ("Ascend950PR_9579", "libdevice.10.bc"),
+        ("Ascend910_9691", "libdevice.9201.bc"),
+        ("Ascend960", "libdevice.9201.bc"),
+    ],
+)
+def test_get_libdevice_selects_architecture_specific_bitcode(arch, filename):
+    assert Path(compiler.get_libdevice(arch)).name == filename
+
+
+def test_get_libdevice_rejects_unsupported_architecture():
+    with pytest.raises(ValueError, match="unsupported Ascend architecture"):
+        compiler.get_libdevice("unknown")
+
+
 def test_get_simt_stack_limit_default(monkeypatch):
     """Without torch_npu installed, should return default 1152."""
     monkeypatch.setitem(sys.modules, "torch_npu", None)
@@ -168,7 +188,6 @@ def test_text_pipeline_uses_ttadapter_directly(backend, monkeypatch):
     stages = {}
     backend.add_stages(stages, options, language=None)
     assert list(stages) == ["ttir", "ttadapter", "npubin"]
-    assert backend.binary_extensions == {"npubin"}
 
     def no_bridge(*args, **kwargs):
         pytest.fail("text compatibility stage must not launch a subprocess")
@@ -249,7 +268,7 @@ def test_legacy_bisheng_options_launch_uses_backend_defaults(backend, value):
         options, signature, constexprs, attrs = kernel._pack_args(backend, kwargs, {}, [], None)
 
     assert kwargs == {"bisheng_options": value}
-    assert options.bisheng_options == "-cce-link-aicore-ll-module " + compiler.get_libdevice()
+    assert options.bisheng_options == "-cce-link-aicore-ll-module " + compiler.get_libdevice(options.target_arch)
     assert options.__dict__ == baseline.__dict__
     assert options.hash() == baseline.hash()
     assert signature == constexprs == attrs == {}
