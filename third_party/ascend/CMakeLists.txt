@@ -125,16 +125,28 @@ else()
   target_compile_definitions(TritonToGraph PRIVATE TRITON_ASCEND_HAS_INPROC_COSTMODEL=0)
 endif()
 
+if(TARGET MLIRAVEDialect)
+  set(TLA_AVE_DIALECT MLIRAVEDialect)
+elseif(EXISTS "${ASCENDNPU_IR_BINARY_DIR}/bishengir/lib/Dialect/HIVMAVE/IR/libMLIRAVEDialect.a")
+  # The standalone IR-only NPUIR configuration does not define the AVE target;
+  # reuse the archive if a previous build produced it.
+  set(TLA_AVE_DIALECT
+    "${ASCENDNPU_IR_BINARY_DIR}/bishengir/lib/Dialect/HIVMAVE/IR/libMLIRAVEDialect.a")
+else()
+  message(FATAL_ERROR "TLA SIMD requires MLIRAVEDialect (ave.hir.*)")
+endif()
+
 add_triton_plugin(TritonAscend
   ${CMAKE_CURRENT_SOURCE_DIR}/triton_ascend.cc
   ${CMAKE_CURRENT_SOURCE_DIR}/ascend_ir.cc
+  ${CMAKE_CURRENT_SOURCE_DIR}/language/tla/cpp/tla_builder.cc
   LINK_LIBS
   TritonToGraph
   TritonToLinalg
   BiShengIRScopeDialect
   BiShengIRHIVMDialect
+  ${TLA_AVE_DIALECT}
 )
-
 option(TRITON_ENABLE_COVERAGE_LLVM_COV "Enable code llvm-cov coverage tool for Ascend plugin " OFF)
 if(TRITON_ENABLE_COVERAGE_LLVM_COV)
   message(STATUS "Enabling llvm-cov coverage tool flags for TritonAscend")
