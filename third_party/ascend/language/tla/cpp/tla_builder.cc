@@ -64,8 +64,8 @@ namespace {
 //   "fp8e5"    -> f8E5M2   (E5M2 profile)
 Type resolveSimdElementType(MLIRContext *ctx, const py::object &elem) {
   if (!py::isinstance<py::str>(elem)) {
-    throw std::invalid_argument(
-        "simd element spec must be a tag string: i8 / bf16 / f32 / fp8e4nv / fp8e5");
+    throw std::invalid_argument("simd element spec must be a tag string: i8 / "
+                                "bf16 / f32 / fp8e4nv / fp8e5");
   }
   const std::string tag = elem.cast<std::string>();
   if (tag == "i8")
