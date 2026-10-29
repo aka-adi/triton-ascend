@@ -107,6 +107,7 @@ _ELEM_SPECS = {
     "f16": 16,
     "f32": 32,
     "fp8e4nv": 8,
+    "fp8e5": 8,
 }
 
 # short dtype name spellings accepted by bitcast(), resolved to canonical
@@ -119,6 +120,7 @@ _DTYPE_ALIASES = {
     "bf16": "bf16",
     "fp8e4nv": "fp8e4nv",
     "float8e4nv": "fp8e4nv",
+    "fp8e5": "fp8e5",
 }
 
 
@@ -135,6 +137,7 @@ def _elem_tag(dtype_):
         "float8e4nv": "fp8e4nv",
         "fp8e4m3fn": "fp8e4nv",
         "float8e4m3fn": "fp8e4nv",
+        "fp8e5": "fp8e5",
         "bf16": "bf16",
         "bfloat16": "bf16",
         "fp16": "f16",
@@ -153,7 +156,7 @@ def _elem_tag(dtype_):
     }.get(name)
     if tag is None:
         raise ValueError(f"unsupported simd element dtype {dtype_}; supported: "
-                         f"i8/i16/i32/i64/bf16/f16/f32/fp8e4nv")
+                         f"i8/i16/i32/i64/bf16/f16/f32/fp8e4nv/fp8e5")
     return tag
 
 

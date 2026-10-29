@@ -61,10 +61,11 @@ namespace {
 //   "bf16"     -> bf16
 //   "f32"      -> f32      (decode output)
 //   "fp8e4nv"  -> f8E4M3FN (E4M3FN profile)
+//   "fp8e5"    -> f8E5M2   (E5M2 profile)
 Type resolveSimdElementType(MLIRContext *ctx, const py::object &elem) {
   if (!py::isinstance<py::str>(elem)) {
     throw std::invalid_argument(
-        "simd element spec must be a tag string: i8 / bf16 / f32 / fp8e4nv");
+        "simd element spec must be a tag string: i8 / bf16 / f32 / fp8e4nv / fp8e5");
   }
   const std::string tag = elem.cast<std::string>();
   if (tag == "i8")
@@ -83,8 +84,10 @@ Type resolveSimdElementType(MLIRContext *ctx, const py::object &elem) {
     return Float32Type::get(ctx);
   if (tag == "fp8e4nv")
     return Float8E4M3FNType::get(ctx);
+  if (tag == "fp8e5")
+    return Float8E5M2Type::get(ctx);
   throw std::invalid_argument("unknown simd element tag \"" + tag +
-                              "\"; expected i8 / bf16 / f32 / fp8e4nv");
+                              "\"; expected i8 / bf16 / f32 / fp8e4nv / fp8e5");
 }
 
 // Core type of the enclosing TLA core-mode scope, defaulting to the AIV
