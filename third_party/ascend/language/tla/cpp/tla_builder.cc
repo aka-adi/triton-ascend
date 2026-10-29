@@ -61,10 +61,11 @@ namespace {
 //   "bf16"     -> bf16
 //   "f32"      -> f32      (decode output)
 //   "fp8e4nv"  -> f8E4M3FN (E4M3FN profile)
+//   "fp8e5"    -> f8E5M2   (E5M2 profile)
 Type resolveSimdElementType(MLIRContext *ctx, const py::object &elem) {
   if (!py::isinstance<py::str>(elem)) {
     throw std::invalid_argument(
-        "simd element spec must be a tag string: i8 / bf16 / f32 / fp8e4nv");
+        "simd element spec must be a tag string: i8 / bf16 / f32 / fp8e4nv / fp8e5");
   }
   const std::string tag = elem.cast<std::string>();
   if (tag == "i8")
@@ -83,8 +84,10 @@ Type resolveSimdElementType(MLIRContext *ctx, const py::object &elem) {
     return Float32Type::get(ctx);
   if (tag == "fp8e4nv")
     return Float8E4M3FNType::get(ctx);
+  if (tag == "fp8e5")
+    return Float8E5M2Type::get(ctx);
   throw std::invalid_argument("unknown simd element tag \"" + tag +
-                              "\"; expected i8 / bf16 / f32 / fp8e4nv");
+                              "\"; expected i8 / bf16 / f32 / fp8e4nv / fp8e5");
 }
 
 // vload/masked_store indices must be index-typed.
@@ -204,6 +207,14 @@ void init_tla_builder(py::module &&m) {
             }
             if (kind == "add") {
               return self.create<hivmave::VFAddOp>(resTy, lhs, rhs, mask)
+                  .getResult();
+            }
+            if (kind == "sub") {
+              return self.create<hivmave::VFSubOp>(resTy, lhs, rhs, mask)
+                  .getResult();
+            }
+            if (kind == "or") {
+              return self.create<hivmave::VFOrOp>(resTy, lhs, rhs, mask)
                   .getResult();
             }
             if (kind == "div") {
@@ -463,6 +474,36 @@ void init_tla_builder(py::module &&m) {
             return op.getResult();
           },
           py::arg("src"), py::arg("out_elem_tag"), py::arg("out_lanes"))
+      .def(
+          "create_simd_binary_scalar",
+          [](TLABuilder &self, std::string &kind, Value &vec, Value &scalar,
+             Value &mask) -> Value {
+            auto resTy = vec.getType();
+            if (kind == "mins") {
+              return self.create<hivmave::VFMinsOp>(resTy, vec, scalar, mask)
+                  .getResult();
+            }
+            if (kind == "umins") {
+              return self.create<hivmave::VMinsUIOp>(resTy, vec, scalar, mask)
+                  .getResult();
+            }
+            throw std::invalid_argument("unknown vec-scalar kind: " + kind);
+          },
+          py::arg("kind"), py::arg("vec"), py::arg("scalar"), py::arg("mask"))
+      .def(
+          "create_simd_vsstb",
+          [](TLABuilder &self, Value &ptr, std::vector<Value> &indices,
+             int64_t stride, Value &val, Value &mask) -> void {
+            auto &builder = self.getBuilder();
+            auto loc = self.getLastLoc();
+            auto strideVal = builder.create<arith::ConstantOp>(
+                loc, builder.getIndexAttr(stride));
+            auto indicesIdx = toIndexValues(self, indices);
+            builder.create<hivmave::VFStoreWithStrideOp>(
+                loc, ptr, ValueRange(indicesIdx), strideVal, mask, val);
+          },
+          py::arg("ptr"), py::arg("indices"), py::arg("stride"), py::arg("val"),
+          py::arg("mask"))
       .def("create_tla_buffer_type",
            [](TLABuilder &self, const std::vector<int64_t> &shape,
               Type elementType, const std::string &space,
