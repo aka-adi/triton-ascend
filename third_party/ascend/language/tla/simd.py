@@ -109,6 +109,8 @@ __all__ = [
     "vadd",
     "vadds",
     "vaddc",
+    "dhistv2",
+    "chistv2",
     "vshl",
     "vshls",
     "vshr",
@@ -1257,6 +1259,72 @@ def vaddc(src0: vector, src1: vector, mask: vector = None, _semantic=None) -> tu
     total = _masked_binary("add", src0, src1, mask, MODE.ZEROING, _semantic)
     carry = vcmp(total, src0, mask=mask, op=CMP.ULT, _semantic=_semantic)
     return total, carry
+
+
+def _histogram(acc, src, mask, bin, cumulative, _semantic):
+    _require_vector(acc, "acc")
+    _require_vector(src, "src")
+    if src.type != vector_type(256, tl.uint8) or acc.type != vector_type(128, tl.uint16):
+        raise ValueError("histogram requires uint8x256 src and uint16x128 acc")
+    bin = _unwrap_if_constexpr(bin)
+    if type(bin) is not int or bin not in (0, 1):
+        raise ValueError("histogram bin must be the constexpr integer 0 or 1")
+    mask = _mask_for(mask, 256, _semantic)
+    one = vdup(1, tl.uint8, _semantic=_semantic)
+    zero = vdup(0, tl.uint8, _semantic=_semantic)
+    low_byte = vdup(255, tl.uint16, _semantic=_semantic)
+    byte_shift = vdup(8, tl.uint16, _semantic=_semantic)
+    base = _make_scalar(0, tl.int16, "i16", "histogram", _semantic)
+    ids = vector(_semantic.builder.create_simd_vci(base, "i16", 128, False), vector_type(128, tl.int16))
+    counts = vdup(0, tl.uint16, _semantic=_semantic)
+    for j in range(128):
+        hit = vcmps(src, 128 * bin + j, mask=mask, op=CMP.ULE if cumulative else CMP.EQ, _semantic=_semantic)
+        bits = vsel(hit, one, zero, _semantic=_semantic)
+        # Count adjacent byte indicators in u16: each pair is 0..2, the
+        # full sum is 0..256. This avoids u8 reduction truncation and does
+        # not depend on which adjacent byte is low or high in the carrier.
+        pairs_i = vbitcast(bits, "i16", _semantic=_semantic)
+        pairs = vector(pairs_i.handle, vector_type(128, tl.uint16))
+        pair_counts = vadd(vand(pairs, low_byte, _semantic=_semantic), vshr(pairs, byte_shift, _semantic=_semantic),
+                           _semantic=_semantic)
+        count = vdupv(vreduce(pair_counts, "add", _semantic=_semantic), _semantic=_semantic)
+        lane = vcmps(ids, j, op=CMP.EQ, _semantic=_semantic)
+        counts = vsel(lane, count, counts, _semantic=_semantic)
+    return vadd(acc, counts, _semantic=_semantic)
+
+
+@builtin
+def dhistv2(acc: vector, src: vector, mask: vector = None, bin: tl.constexpr = 0, _semantic=None) -> vector:
+    """Reference frequency histogram using comparisons and wide reductions.
+
+    :param acc: initial uint16x128 bin counts
+    :param src: uint8x256 input values
+    :param mask: active input lanes; defaults to all lanes
+    :param bin: constexpr 0 selects bins 0..127; 1 selects bins 128..255
+    :return: ``acc[j] + count(src == 128 * bin + j)`` for active inputs
+    :rtype: vector
+
+    The caller must keep accumulated counts within uint16 range. This is a
+    128-round AVE composition, not the native histogram instruction.
+    """
+    return _histogram(acc, src, mask, bin, False, _semantic)
+
+
+@builtin
+def chistv2(acc: vector, src: vector, mask: vector = None, bin: tl.constexpr = 0, _semantic=None) -> vector:
+    """Reference cumulative histogram using unsigned threshold comparisons.
+
+    :param acc: initial uint16x128 bin counts
+    :param src: uint8x256 input values
+    :param mask: active input lanes; defaults to all lanes
+    :param bin: constexpr 0 or 1 selects thresholds 0..127 or 128..255
+    :return: ``acc[j] + count(src <= 128 * bin + j)`` for active inputs
+    :rtype: vector
+
+    BIN1 includes all active inputs below 128. The caller must keep counts
+    within uint16 range. This composition does not scan the old accumulator.
+    """
+    return _histogram(acc, src, mask, bin, True, _semantic)
 
 
 @builtin
