@@ -109,6 +109,12 @@ __all__ = [
     "vadd",
     "vadds",
     "vaddc",
+    "vsubc",
+    "vaddcs",
+    "vsubcs",
+    "vcpadd",
+    "vusqz",
+    "vsqz",
     "vshl",
     "vshls",
     "vshr",
@@ -1236,15 +1242,42 @@ def vprelu(src0: vector, src1: vector, mask: vector = None, _semantic=None) -> v
     return vector(handle, src0.type)
 
 
+def _native_carry(kind, src0, src1, carry, mask, name, _semantic):
+    lanes, mask = _carry_operands(src0, src1, mask, name, _semantic)
+    if carry is not None:
+        _check_mask(carry, lanes)
+    # CCE subtraction predicates are carry/no-borrow predicates: vsubc returns
+    # carry, and vsubcs's carrysrcp is true to suppress the incoming borrow.
+    sub = kind in ("vsubc", "vsubcs")
+    carry_in = None
+    if carry is not None:
+        carry_in = pnot(carry, _semantic=_semantic) if sub else carry
+    dst, carry_out = _semantic.builder.create_simd_native_carry(
+        kind,
+        src0.handle,
+        src1.handle,
+        None if carry_in is None else carry_in.handle,
+        mask.handle,
+        _is_unsigned(src0.dtype),
+    )
+    carry_vec = vector(carry_out, vector_type(lanes, tl.int1))
+    if sub:
+        carry_vec = pnot(carry_vec, mask=mask, _semantic=_semantic)
+    return vector(dst, src0.type), carry_vec
+
+
 @builtin
 def vaddc(src0: vector, src1: vector, mask: vector = None, _semantic=None) -> tuple[vector, vector]:
-    """
-    Vector add with carry-out (``vaddc``) for i32/u32 registers.
+    """Add two full 64-lane integer registers and return sum and carry-out.
 
-    Returns ``(sum, carry)`` where ``sum = src0 + src1`` (modulo 2**32) and
-    ``carry`` is an i1 mask holding the two's-complement carry-out of each
-    lane, derived as ``sum <u src0``.  The AVE dialect has no dedicated
-    ``vaddc`` op, so the result is always zeroing.
+    :param src0: full 64-lane ``int32`` or ``uint32`` register
+    :param src1: register with the same dtype and lane count
+    :param mask: optional 64-lane predicate; ``None`` selects all lanes
+    :return: ``(sum, carry)`` where ``sum = src0 + src1`` modulo 2**32 and
+        ``carry = sum <u src0``
+    :rtype: tuple[tla.vector, tla.vector]
+
+    Inactive lanes return a zero sum and a false carry.
     """
     dtype = str(src0.dtype)
     if dtype not in ("int32", "uint32"):
@@ -1257,6 +1290,150 @@ def vaddc(src0: vector, src1: vector, mask: vector = None, _semantic=None) -> tu
     total = _masked_binary("add", src0, src1, mask, MODE.ZEROING, _semantic)
     carry = vcmp(total, src0, mask=mask, op=CMP.ULT, _semantic=_semantic)
     return total, carry
+
+
+def _carry_operands(src0, src1, mask, name, _semantic):
+    dtype = str(src0.dtype)
+    if dtype not in ("int32", "uint32"):
+        raise ValueError(f"{name} only supports int32/uint32, got {dtype}")
+    if src1.dtype != src0.dtype:
+        raise TypeError(f"{name} operands must have the same dtype, "
+                        f"got {src0.dtype} and {src1.dtype}")
+    lanes = src0.type.lanes
+    if lanes != 64:
+        raise ValueError(f"{name} requires a full 64-lane register")
+    mask = _mask_for(mask, lanes, _semantic)
+    return lanes, mask
+
+
+@builtin
+def vsubc(src0: vector, src1: vector, mask: vector = None, _semantic=None) -> tuple[vector, vector]:
+    """Subtract two full 64-lane integer registers and return difference and borrow.
+
+    :param src0: full 64-lane ``int32`` or ``uint32`` register
+    :param src1: register with the same dtype and lane count
+    :param mask: optional 64-lane predicate; ``None`` selects all lanes
+    :return: ``(diff, borrow)`` where ``diff = src0 - src1`` modulo 2**32 and
+        ``borrow = src0 <u src1``
+    :rtype: tuple[tla.vector, tla.vector]
+
+    Inactive lanes return a zero difference and a false borrow.
+    """
+    return _native_carry("vsubc", src0, src1, None, mask, "vsubc", _semantic)
+
+
+@builtin
+def vaddcs(src0: vector, src1: vector, carry: vector, mask: vector = None, _semantic=None) -> tuple[vector, vector]:
+    """Add two full 64-lane integer registers with carry-in and carry-out.
+
+    :param src0: full 64-lane ``int32`` or ``uint32`` register
+    :param src1: register with the same dtype and lane count
+    :param carry: required 64-lane predicate; ``True`` adds one to that lane
+    :param mask: optional 64-lane predicate; ``None`` selects all lanes
+    :return: ``(sum, carry_out)`` where
+        ``sum = src0 + src1 + carry`` modulo 2**32 and ``carry_out`` is the
+        unsigned carry-out
+    :rtype: tuple[tla.vector, tla.vector]
+
+    Inactive lanes return a zero sum and a false carry-out.
+    """
+    return _native_carry("vaddcs", src0, src1, carry, mask, "vaddcs", _semantic)
+
+
+@builtin
+def vsubcs(src0: vector, src1: vector, borrow: vector, mask: vector = None, _semantic=None) -> tuple[vector, vector]:
+    """Subtract two full 64-lane integer registers with borrow-in and borrow-out.
+
+    :param src0: full 64-lane ``int32`` or ``uint32`` register
+    :param src1: register with the same dtype and lane count
+    :param borrow: required 64-lane predicate; ``True`` subtracts one
+    :param mask: optional 64-lane predicate; ``None`` selects all lanes
+    :return: ``(diff, borrow_out)`` where
+        ``diff = src0 - src1 - borrow`` modulo 2**32 and ``borrow_out`` is the
+        unsigned borrow-out
+    :rtype: tuple[tla.vector, tla.vector]
+
+    Inactive lanes return a zero difference and a false borrow-out.
+    """
+    return _native_carry("vsubcs", src0, src1, borrow, mask, "vsubcs", _semantic)
+
+
+@builtin
+def vcpadd(src: vector, mask: vector = None, _semantic=None) -> vector:
+    """Sum adjacent source lanes and write the results to the lower half.
+
+    For a full register with ``N`` lanes, result lane ``j < N/2`` is
+    ``src[2*j] + src[2*j+1]`` for active inputs. The upper half is zero.
+    Inactive input lanes contribute zero.
+
+    :param src: full ``f16`` (128 lanes) or ``f32`` (64 lanes) register
+    :param mask: optional predicate with one lane per source element;
+        ``None`` selects all lanes
+    :return: ``N/2`` pair sums in the lower half, zero upper half
+    :rtype: tla.vector
+    """
+    _require_vector(src, "src")
+    tag = _elem_tag(src.dtype)
+    if tag not in ("f16", "f32"):
+        raise ValueError(f"vcpadd supports f16/f32, got {src.dtype}")
+    lanes = _lanes_for(tag)
+    if src.type.lanes != lanes:
+        raise ValueError("vcpadd requires a full register")
+    mask = _mask_for(mask, lanes, _semantic)
+    handle = _semantic.builder.create_simd_native_vcpadd(src.handle, mask.handle)
+    return vector(handle, src.type)
+
+
+@builtin
+def vusqz(mask: vector, dtype="u32", _semantic=None) -> vector:
+    """Return the exclusive prefix count of an active-lane predicate.
+
+    For result lane ``i``, the value is the number of active mask lanes with
+    index smaller than ``i``. The result width follows ``dtype``:
+    ``u8/i8`` uses 256 lanes, ``u16/i16`` uses 128 lanes, and ``u32/i32``
+    uses 64 lanes.
+
+    :param mask: required predicate with one lane per result element
+    :param dtype: result element dtype; signed or unsigned 8/16/32-bit integer
+    :return: exclusive prefix counts; signed results use the same bit pattern
+    :rtype: tla.vector
+    """
+    tag, dtype = _resolve_element_dtype(dtype)
+    if tag not in ("i8", "i16", "i32"):
+        raise ValueError("vusqz requires an 8/16/32-bit integer dtype")
+    lanes = _lanes_for(tag)
+    _check_mask(mask, lanes)
+    work_dtype = {"i8": tl.uint8, "i16": tl.uint16, "i32": tl.uint32}[tag]
+    zero = vdup(0, work_dtype, _semantic=_semantic)
+    handle = _semantic.builder.create_simd_native_vusqz(zero.handle, mask.handle)
+    return vector(handle, vector_type(lanes, dtype))
+
+
+@builtin
+def vsqz(src: vector, mask: vector, _semantic=None) -> vector:
+    """Stable-compact selected source lanes into the lower result lanes.
+
+    Active source values are copied in original order to result lanes
+    ``0..count-1``, where ``count`` is the number of active mask lanes.
+    Remaining lanes are zero. Supported full-register forms are:
+    ``u8/i8`` 256 lanes, ``u16/i16`` 128 lanes, ``u32/i32`` 64 lanes,
+    ``f16`` 128 lanes and ``f32`` 64 lanes.
+
+    :param src: full source register to compact
+    :param mask: required predicate selecting source lanes
+    :return: compacted active values followed by zeros
+    :rtype: tla.vector
+    """
+    _require_vector(src, "src")
+    tag = _elem_tag(src.dtype)
+    if tag not in ("i8", "i16", "i32", "f16", "f32"):
+        raise ValueError("vsqz supports i8/i16/i32/f16/f32 registers")
+    lanes = _lanes_for(tag)
+    if src.type.lanes != lanes:
+        raise ValueError("vsqz requires a full register")
+    _check_mask(mask, lanes)
+    handle = _semantic.builder.create_simd_native_vsqz_x(src.handle, mask.handle)
+    return vector(handle, src.type)
 
 
 @builtin

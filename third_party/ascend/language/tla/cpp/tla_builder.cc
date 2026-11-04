@@ -28,6 +28,7 @@
 #include "bishengir/Dialect/Scope/IR/Scope.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
@@ -37,6 +38,7 @@
 #include "mlir/IR/Region.h"
 #include "mlir/IR/Types.h"
 #include "mlir/Support/LLVM.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/StringMap.h"
 
 #include <optional>
@@ -286,6 +288,41 @@ Value applySimdMode(TLABuilder &self, Value result, Value mask,
       self.create<hivmave::VFBroadcastScalarOp>(vecTy, zeroScalar).getResult();
   return self.create<hivmave::VFSelectOp>(vecTy, mask, result, zeroVector)
       .getResult();
+}
+
+// Native SIMD intrinsics use the physical 256-bit predicate register. TLA
+// predicates carry the logical lane count, so crossing that boundary is an
+// unrealized cast, not a vector bitcast.
+VectorType physicalPredicateType(OpBuilder &builder) {
+  return VectorType::get({256}, builder.getI1Type());
+}
+
+Value logicalPredicate(TLABuilder &self, Value value, int64_t lanes) {
+  auto ty = VectorType::get({lanes}, self.getBuilder().getI1Type());
+  if (value.getType() == ty)
+    return value;
+  return self
+      .create<UnrealizedConversionCastOp>(TypeRange{ty}, ValueRange{value})
+      .getResult(0);
+}
+
+Value physicalPredicate(TLABuilder &self, Value value) {
+  auto ty = dyn_cast<VectorType>(value.getType());
+  if (!ty || ty.getRank() != 1 || !ty.getElementType().isInteger(1) ||
+      (ty.getNumElements() != 64 && ty.getNumElements() != 128 &&
+       ty.getNumElements() != 256))
+    throw std::invalid_argument(
+        "native predicate requires 64/128/256 logical lanes");
+  return logicalPredicate(self, value, 256);
+}
+
+Value nativeSimdCall(TLABuilder &self, Type result, StringRef name,
+                     ValueRange args) {
+  auto &builder = self.getBuilder();
+  builder.getContext()->getOrLoadDialect<LLVM::LLVMDialect>();
+  return self
+      .create<LLVM::CallIntrinsicOp>(result, builder.getStringAttr(name), args)
+      .getResult(0);
 }
 
 } // namespace
@@ -704,6 +741,111 @@ void init_tla_builder(py::module &&m) {
             return op.getResult();
           },
           py::arg("vector"), py::arg("mask"), py::arg("kind"))
+      .def(
+          "create_simd_native_carry",
+          [](TLABuilder &self, const std::string &kind, Value src0,
+             Value src1, py::object carry, Value mask,
+             bool isUnsigned) -> std::pair<Value, Value> {
+            auto ty = dyn_cast<VectorType>(src0.getType());
+            if (!ty || src0.getType() != src1.getType() || ty.getRank() != 1 ||
+                !ty.getElementType().isInteger(32) ||
+                ty.getNumElements() != 64)
+              throw std::invalid_argument(
+                  "native carry requires matching i32/u32 64-lane registers");
+            if (mask.getType() !=
+                VectorType::get({ty.getNumElements()},
+                                self.getBuilder().getI1Type()))
+              throw std::invalid_argument(
+                  "native carry mask must match source lanes");
+            const bool ternary = kind == "vaddcs" || kind == "vsubcs";
+            if (kind != "vaddc" && kind != "vsubc" && !ternary)
+              throw std::invalid_argument("unknown native carry kind: " +
+                                          kind);
+            if (ternary != !carry.is_none())
+              throw std::invalid_argument(
+                  "carry operand is required exactly for vaddcs/vsubcs");
+            SmallVector<Value> args{src0, src1};
+            if (ternary)
+              args.push_back(physicalPredicate(self, py::cast<Value>(carry)));
+            args.push_back(physicalPredicate(self, mask));
+            auto *ctx = self.getBuilder().getContext();
+            auto predTy = physicalPredicateType(self.getBuilder());
+            auto pairTy = LLVM::LLVMStructType::getLiteral(ctx, {ty, predTy});
+            std::string name = "llvm.hivm." + kind + ".v64" +
+                               (isUnsigned ? "u32" : "s32");
+            Value result = nativeSimdCall(self, pairTy, name, args);
+            Value dst = self.create<LLVM::ExtractValueOp>(result, 0);
+            Value carryOut = self.create<LLVM::ExtractValueOp>(result, 1);
+            return {dst, logicalPredicate(self, carryOut, ty.getNumElements())};
+          },
+          py::arg("kind"), py::arg("src0"), py::arg("src1"),
+          py::arg("carry"), py::arg("mask"), py::arg("unsigned"))
+      .def(
+          "create_simd_native_vcpadd",
+          [](TLABuilder &self, Value src, Value mask) -> Value {
+            auto ty = dyn_cast<VectorType>(src.getType());
+            if (!ty || ty.getRank() != 1 ||
+                !(ty.getElementType().isF16() || ty.getElementType().isF32()) ||
+                ty.getNumElements() *
+                        ty.getElementType().getIntOrFloatBitWidth() !=
+                    2048)
+              throw std::invalid_argument(
+                  "native vcpadd requires a full f16/f32 register");
+            if (mask.getType() !=
+                VectorType::get({ty.getNumElements()},
+                                self.getBuilder().getI1Type()))
+              throw std::invalid_argument(
+                  "native vcpadd mask must match source lanes");
+            return nativeSimdCall(self, ty, "llvm.hivm.vcpadd.x",
+                                  {src, physicalPredicate(self, mask)});
+          },
+          py::arg("src"), py::arg("mask"))
+      .def(
+          "create_simd_native_vusqz",
+          [](TLABuilder &self, Value dst, Value mask) -> Value {
+            auto ty = dyn_cast<VectorType>(dst.getType());
+            if (!ty || ty.getRank() != 1 ||
+                !(ty.getElementType().isInteger(8) ||
+                  ty.getElementType().isInteger(16) ||
+                  ty.getElementType().isInteger(32)) ||
+                ty.getNumElements() *
+                        ty.getElementType().getIntOrFloatBitWidth() !=
+                    2048)
+              throw std::invalid_argument(
+                  "native vusqz requires a full 8/16/32-bit register");
+            if (mask.getType() !=
+                VectorType::get({ty.getNumElements()},
+                                self.getBuilder().getI1Type()))
+              throw std::invalid_argument(
+                  "native vusqz mask must match source lanes");
+            return nativeSimdCall(self, ty, "llvm.hivm.vusqz.m",
+                                  {dst, physicalPredicate(self, mask)});
+          },
+          py::arg("dst"), py::arg("mask"))
+      .def(
+          "create_simd_native_vsqz_x",
+          [](TLABuilder &self, Value src, Value mask) -> Value {
+            auto ty = dyn_cast<VectorType>(src.getType());
+            if (!ty || ty.getRank() != 1 ||
+                !(ty.getElementType().isInteger(8) ||
+                  ty.getElementType().isInteger(16) ||
+                  ty.getElementType().isInteger(32) ||
+                  ty.getElementType().isF16() || ty.getElementType().isF32()) ||
+                ty.getNumElements() *
+                        ty.getElementType().getIntOrFloatBitWidth() !=
+                    2048)
+              throw std::invalid_argument(
+                  "native vsqz.x requires a full register");
+            if (mask.getType() !=
+                VectorType::get({ty.getNumElements()},
+                                self.getBuilder().getI1Type()))
+              throw std::invalid_argument(
+                  "native vsqz.x mask must match source lanes");
+            Value store = self.create<arith::ConstantIntOp>(1, 32);
+            return nativeSimdCall(self, ty, "llvm.hivm.vsqz.x",
+                                  {src, physicalPredicate(self, mask), store});
+          },
+          py::arg("src"), py::arg("mask"))
       .def(
           "create_simd_vci",
           [](TLABuilder &self, Value &index, py::object elem_tag, int32_t lanes,
