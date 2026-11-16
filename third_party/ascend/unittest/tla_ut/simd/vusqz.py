@@ -13,11 +13,11 @@ from utils.tla_test_utils import (compile_offline, get_stages, lower_offline, ch
 def vusqz_kernel(M, O, D: tl.constexpr, N: tl.constexpr, DIST: tl.constexpr):
     m = tla.alloc((N, ), D, space="ub")
     o = tla.alloc((N, ), D, space="ub")
-    tla.copy(tla.view(M, (N, )), m)
+    tla.load_gm_to_ub(tla.view(M, (N, )), m)
     with tla.scope.simd():
         mask = tla.simd.vcmps(tla.simd.vlds(m[0]), 0, op=tla.simd.CMP.NE)
         tla.simd.vsts(o[0], tla.simd.vusqz(mask, D), dist=DIST)
-    tla.copy(o, tla.view(O, (N, )))
+    tla.store_ub_to_gm(o, tla.view(O, (N, )))
 
 
 CASES = [

@@ -41,8 +41,8 @@ def group_kernel(X, M, O, DT: tl.constexpr, W: tl.constexpr, OP: tl.constexpr, M
     OUT_N: tl.constexpr = 64 if WIDEN else N
     OW: tl.constexpr = 32 if WIDEN else W
     out = tla.alloc((OUT_N, ), OUT_DT, space="ub")
-    tla.copy(tla.view(X, (N, )), x)
-    tla.copy(tla.view(M, (N, )), m)
+    tla.load_gm_to_ub(tla.view(X, (N, )), x)
+    tla.load_gm_to_ub(tla.view(M, (N, )), m)
     with tla.scope.simd():
         a = tla.simd.vlds(x[0])
         mask = tla.simd.vcmps(tla.simd.vlds(m[0]), 0, op=tla.simd.CMP.NE)
@@ -55,7 +55,7 @@ def group_kernel(X, M, O, DT: tl.constexpr, W: tl.constexpr, OP: tl.constexpr, M
         else:
             result = tla.simd.vcgmin(a, mask, mode=MODE)
         tla.simd.vsts(out[0], result, dist="NORM_B16" if OW == 16 else "NORM_B32")
-    tla.copy(out, tla.view(O, (OUT_N, )))
+    tla.store_ub_to_gm(out, tla.view(O, (OUT_N, )))
 
 
 TYPES = [("int16", "i16", 16), ("uint16", "u16", 16), ("int32", "i32", 32), ("uint32", "u32", 32),

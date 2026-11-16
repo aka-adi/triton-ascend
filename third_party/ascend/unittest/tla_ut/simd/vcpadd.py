@@ -14,12 +14,12 @@ def vcpadd_kernel(X, M, O, D: tl.constexpr, I: tl.constexpr, N: tl.constexpr, DI
     x = tla.alloc((N, ), D, space="ub")
     m = tla.alloc((N, ), I, space="ub")
     o = tla.alloc((N, ), D, space="ub")
-    tla.copy(tla.view(X, (N, )), x)
-    tla.copy(tla.view(M, (N, )), m)
+    tla.load_gm_to_ub(tla.view(X, (N, )), x)
+    tla.load_gm_to_ub(tla.view(M, (N, )), m)
     with tla.scope.simd():
         mask = tla.simd.vcmps(tla.simd.vlds(m[0]), 0, op=tla.simd.CMP.NE)
         tla.simd.vsts(o[0], tla.simd.vcpadd(tla.simd.vlds(x[0]), mask, mode=MODE), dist=DIST)
-    tla.copy(o, tla.view(O, (N, )))
+    tla.store_ub_to_gm(o, tla.view(O, (N, )))
 
 
 CASES = [

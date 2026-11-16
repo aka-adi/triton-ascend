@@ -37,10 +37,10 @@ def memory_completion(X, I, M, D, O, DT: tl.constexpr, W: tl.constexpr, OP: tl.c
     m = tla.alloc((N, ), tl.int16 if W == 16 else tl.int32, space="ub")
     dst = tla.alloc((1024, ), DT, space="ub")
     out = tla.alloc((2, N), DT, space="ub")
-    tla.copy(tla.view(X, (1024, )), x)
-    tla.copy(tla.view(I, (64, )), i)
-    tla.copy(tla.view(M, (N, )), m)
-    tla.copy(tla.view(D, (1024, )), dst)
+    tla.load_gm_to_ub(tla.view(X, (1024, )), x)
+    tla.load_gm_to_ub(tla.view(I, (64, )), i)
+    tla.load_gm_to_ub(tla.view(M, (N, )), m)
+    tla.load_gm_to_ub(tla.view(D, (1024, )), dst)
     with tla.scope.simd():
         a = tla.simd.vlds(x[BASE])
         index = tla.simd.vlds(i[0])
@@ -61,7 +61,7 @@ def memory_completion(X, I, M, D, O, DT: tl.constexpr, W: tl.constexpr, OP: tl.c
             r1 = tla.simd.vlds(dst[BASE])
         tla.simd.vsts(out[0, 0], r0, dist="NORM_B16" if W == 16 else "NORM_B32")
         tla.simd.vsts(out[1, 0], r1, dist="NORM_B16" if W == 16 else "NORM_B32")
-    tla.copy(out, tla.view(O, (2, N)))
+    tla.store_ub_to_gm(out, tla.view(O, (2, N)))
 
 
 CASES = [(op, name, sig, width)
@@ -139,8 +139,8 @@ def scatter_alias(INIT, I, O, CHECK, OFFSET, STEPS, ALIAS: tl.constexpr):
     buf = tla.alloc((256, ), tl.int32, space="ub")
     indices = tla.alloc((64, ), tl.uint32, space="ub")
     check = tla.alloc((2, 64), tl.int32, space="ub")
-    tla.copy(tla.view(INIT, (256, )), buf)
-    tla.copy(tla.view(I, (64, )), indices)
+    tla.load_gm_to_ub(tla.view(INIT, (256, )), buf)
+    tla.load_gm_to_ub(tla.view(I, (64, )), indices)
     if ALIAS == "captured":
         target = tla.subview(buf, offsets=(OFFSET, ), sizes=(128, ))
     with tla.scope.simd():
@@ -159,8 +159,8 @@ def scatter_alias(INIT, I, O, CHECK, OFFSET, STEPS, ALIAS: tl.constexpr):
         after = tla.simd.vlds(buf[64])
         tla.simd.vsts(check[0, 0], before)
         tla.simd.vsts(check[1, 0], after)
-    tla.copy(buf, tla.view(O, (256, )))
-    tla.copy(check, tla.view(CHECK, (2, 64)))
+    tla.store_ub_to_gm(buf, tla.view(O, (256, )))
+    tla.store_ub_to_gm(check, tla.view(CHECK, (2, 64)))
 
 
 @pytest.mark.parametrize("alias", ("root", "inner", "captured"))

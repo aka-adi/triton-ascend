@@ -38,9 +38,9 @@ def permutation_kernel(X, I, M, O, DT: tl.constexpr, W: tl.constexpr, MASKED: tl
     i = tla.alloc((N, ), IT, space="ub")
     m = tla.alloc((N, ), MT, space="ub")
     out = tla.alloc((2, N), DT, space="ub")
-    tla.copy(tla.view(X, (N, )), x)
-    tla.copy(tla.view(I, (N, )), i)
-    tla.copy(tla.view(M, (N, )), m)
+    tla.load_gm_to_ub(tla.view(X, (N, )), x)
+    tla.load_gm_to_ub(tla.view(I, (N, )), i)
+    tla.load_gm_to_ub(tla.view(M, (N, )), m)
     with tla.scope.simd():
         mask = tla.simd.vcmps(tla.simd.vlds(m[0]), 0, op=tla.simd.CMP.NE)
         if not MASKED:
@@ -52,7 +52,7 @@ def permutation_kernel(X, I, M, O, DT: tl.constexpr, W: tl.constexpr, MASKED: tl
             b = a
         tla.simd.vsts(out[0, 0], a, dist="NORM_B8" if W == 8 else ("NORM_B16" if W == 16 else "NORM_B32"))
         tla.simd.vsts(out[1, 0], b, dist="NORM_B8" if W == 8 else ("NORM_B16" if W == 16 else "NORM_B32"))
-    tla.copy(out, tla.view(O, (2, N)))
+    tla.store_ub_to_gm(out, tla.view(O, (2, N)))
 
 
 TYPES = [("int8", "i8", 8), ("uint8", "u8", 8), ("int16", "i16", 16), ("uint16", "u16", 16), ("int32", "i32", 32),

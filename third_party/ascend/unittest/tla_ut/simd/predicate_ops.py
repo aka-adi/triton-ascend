@@ -37,8 +37,8 @@ def predicate_kernel(X, Y, O, W: tl.constexpr, OP: tl.constexpr, PART: tl.conste
     x = tla.alloc((32, ), tl.uint8, space="ub")
     y = tla.alloc((32, ), tl.uint8, space="ub")
     out = tla.alloc((2, ON), DT, space="ub")
-    tla.copy(tla.view(X, (32, )), x)
-    tla.copy(tla.view(Y, (32, )), y)
+    tla.load_gm_to_ub(tla.view(X, (32, )), x)
+    tla.load_gm_to_ub(tla.view(Y, (32, )), y)
     with tla.scope.simd():
         a = tla.simd.pld(x[0], width=W)
         b = tla.simd.pld(y[0], width=W)
@@ -58,7 +58,7 @@ def predicate_kernel(X, Y, O, W: tl.constexpr, OP: tl.constexpr, PART: tl.conste
                       ("NORM_B16" if OW == 16 else "NORM_B32"))
         tla.simd.vsts(out[1, 0], tla.simd.vsel(q, one, zero), dist="NORM_B8" if OW == 8 else
                       ("NORM_B16" if OW == 16 else "NORM_B32"))
-    tla.copy(out, tla.view(O, (2, ON)))
+    tla.store_ub_to_gm(out, tla.view(O, (2, ON)))
 
 
 CASES = [(op, w, part)
@@ -147,7 +147,7 @@ def pack_generated_kernel(O, W: tl.constexpr, COUNT: tl.constexpr):
         zero = tla.simd.vsplat(0, DT)
         tla.simd.vsts(out[0, 0], tla.simd.vsel(lo, one, zero), dist="NORM_B8" if W == 16 else "NORM_B16")
         tla.simd.vsts(out[1, 0], tla.simd.vsel(hi, one, zero), dist="NORM_B8" if W == 16 else "NORM_B16")
-    tla.copy(out, tla.view(O, (2, 2 * N)))
+    tla.store_ub_to_gm(out, tla.view(O, (2, 2 * N)))
 
 
 @pytest.mark.parametrize("width,count", ((16, 8), (16, 128), (32, 8), (32, 64)))
@@ -179,8 +179,8 @@ def predicate_roundtrip_kernel(X, Y, O, COUNT, W: tl.constexpr, PART: tl.constex
     x = tla.alloc((N, ), DT, space="ub")
     y = tla.alloc((N, ), DT, space="ub")
     out = tla.alloc((4, N), DT, space="ub")
-    tla.copy(tla.view(X, (N, )), x)
-    tla.copy(tla.view(Y, (N, )), y)
+    tla.load_gm_to_ub(tla.view(X, (N, )), x)
+    tla.load_gm_to_ub(tla.view(Y, (N, )), y)
     with tla.scope.simd():
         a = tla.simd.vcmps(tla.simd.vlds(x[0]), COUNT, op=tla.simd.CMP.LT)
         b = tla.simd.vcmps(tla.simd.vlds(y[0]), 0, op=tla.simd.CMP.NE)
@@ -200,7 +200,7 @@ def predicate_roundtrip_kernel(X, Y, O, COUNT, W: tl.constexpr, PART: tl.constex
                       ("NORM_B16" if W == 16 else "NORM_B32"))
         tla.simd.vsts(out[3, 0], tla.simd.vsel(rb, one, zero), dist="NORM_B8" if W == 8 else
                       ("NORM_B16" if W == 16 else "NORM_B32"))
-    tla.copy(out, tla.view(O, (4, N)))
+    tla.store_ub_to_gm(out, tla.view(O, (4, N)))
 
 
 @pytest.mark.parametrize("width,part", [(8, "lower")] + [(w, p) for w in (16, 32) for p in ("lower", "higher")])

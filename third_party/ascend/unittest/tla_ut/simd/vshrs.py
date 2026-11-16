@@ -36,8 +36,8 @@ def shift_scalar(X, M, O, SHIFT, DT: tl.constexpr, W: tl.constexpr, DYNAMIC: tl.
     x = tla.alloc((N, ), DT, space="ub")
     masks = tla.alloc((N, ), DT, space="ub")
     out = tla.alloc((N, ), DT, space="ub")
-    tla.copy(tla.view(X, (N, )), x)
-    tla.copy(tla.view(M, (N, )), masks)
+    tla.load_gm_to_ub(tla.view(X, (N, )), x)
+    tla.load_gm_to_ub(tla.view(M, (N, )), masks)
     with tla.scope.simd():
         src = tla.simd.vlds(x[0])
         mask = tla.simd.vcmps(tla.simd.vlds(masks[0]), 0, op=tla.simd.CMP.NE)
@@ -48,7 +48,7 @@ def shift_scalar(X, M, O, SHIFT, DT: tl.constexpr, W: tl.constexpr, DYNAMIC: tl.
         else:
             result = tla.simd.vshrs(src, 3, mask, mode=MODE)
         tla.simd.vsts(out[0], result, dist="NORM_B8" if W == 8 else ("NORM_B16" if W == 16 else "NORM_B32"))
-    tla.copy(out, tla.view(O, (N, )))
+    tla.store_ub_to_gm(out, tla.view(O, (N, )))
 
 
 TYPES = [("int8", "i8", 8), ("uint8", "u8", 8), ("int16", "i16", 16), ("uint16", "u16", 16), ("int32", "i32", 32),

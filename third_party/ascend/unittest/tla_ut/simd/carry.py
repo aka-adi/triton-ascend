@@ -19,10 +19,10 @@ def vaddcs_kernel(X, Y, C, M, D, B, T: tl.constexpr):
     m = tla.alloc((64, ), tl.int32, space="ub")
     d = tla.alloc((64, ), T, space="ub")
     b = tla.alloc((64, ), tl.int32, space="ub")
-    tla.copy(tla.view(X, (64, )), x)
-    tla.copy(tla.view(Y, (64, )), y)
-    tla.copy(tla.view(C, (64, )), c)
-    tla.copy(tla.view(M, (64, )), m)
+    tla.load_gm_to_ub(tla.view(X, (64, )), x)
+    tla.load_gm_to_ub(tla.view(Y, (64, )), y)
+    tla.load_gm_to_ub(tla.view(C, (64, )), c)
+    tla.load_gm_to_ub(tla.view(M, (64, )), m)
     with tla.scope.simd():
         mask = tla.simd.vcmps(tla.simd.vlds(m[0]), 0, op=tla.simd.CMP.NE)
         carry = tla.simd.vcmps(tla.simd.vlds(c[0]), 0, op=tla.simd.CMP.NE)
@@ -30,8 +30,8 @@ def vaddcs_kernel(X, Y, C, M, D, B, T: tl.constexpr):
         tla.simd.vsts(d[0], total)
         bits = tla.simd.vsel(carry_out, tla.simd.vdup(1, tl.int32), tla.simd.vdup(0, tl.int32))
         tla.simd.vsts(b[0], bits)
-    tla.copy(d, tla.view(D, (64, )))
-    tla.copy(b, tla.view(B, (64, )))
+    tla.store_ub_to_gm(d, tla.view(D, (64, )))
+    tla.store_ub_to_gm(b, tla.view(B, (64, )))
 
 
 @tla.jit
@@ -42,10 +42,10 @@ def vsubcs_kernel(X, Y, C, M, D, B, T: tl.constexpr):
     m = tla.alloc((64, ), tl.int32, space="ub")
     d = tla.alloc((64, ), T, space="ub")
     b = tla.alloc((64, ), tl.int32, space="ub")
-    tla.copy(tla.view(X, (64, )), x)
-    tla.copy(tla.view(Y, (64, )), y)
-    tla.copy(tla.view(C, (64, )), c)
-    tla.copy(tla.view(M, (64, )), m)
+    tla.load_gm_to_ub(tla.view(X, (64, )), x)
+    tla.load_gm_to_ub(tla.view(Y, (64, )), y)
+    tla.load_gm_to_ub(tla.view(C, (64, )), c)
+    tla.load_gm_to_ub(tla.view(M, (64, )), m)
     with tla.scope.simd():
         mask = tla.simd.vcmps(tla.simd.vlds(m[0]), 0, op=tla.simd.CMP.NE)
         borrow = tla.simd.vcmps(tla.simd.vlds(c[0]), 0, op=tla.simd.CMP.NE)
@@ -53,8 +53,8 @@ def vsubcs_kernel(X, Y, C, M, D, B, T: tl.constexpr):
         tla.simd.vsts(d[0], diff)
         bits = tla.simd.vsel(borrow_out, tla.simd.vdup(1, tl.int32), tla.simd.vdup(0, tl.int32))
         tla.simd.vsts(b[0], bits)
-    tla.copy(d, tla.view(D, (64, )))
-    tla.copy(b, tla.view(B, (64, )))
+    tla.store_ub_to_gm(d, tla.view(D, (64, )))
+    tla.store_ub_to_gm(b, tla.view(B, (64, )))
 
 
 CASES = [
