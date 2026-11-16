@@ -13,12 +13,12 @@ MASK32 = 0xFFFFFFFF
 
 @tla.jit
 def vaddcs_kernel(X, Y, C, M, D, B, T: tl.constexpr):
-    x = tla.alloc_buffer((64, ), T, space="ub")
-    y = tla.alloc_buffer((64, ), T, space="ub")
-    c = tla.alloc_buffer((64, ), tl.int32, space="ub")
-    m = tla.alloc_buffer((64, ), tl.int32, space="ub")
-    d = tla.alloc_buffer((64, ), T, space="ub")
-    b = tla.alloc_buffer((64, ), tl.int32, space="ub")
+    x = tla.alloc((64, ), T, space="ub")
+    y = tla.alloc((64, ), T, space="ub")
+    c = tla.alloc((64, ), tl.int32, space="ub")
+    m = tla.alloc((64, ), tl.int32, space="ub")
+    d = tla.alloc((64, ), T, space="ub")
+    b = tla.alloc((64, ), tl.int32, space="ub")
     tla.copy(tla.view(X, (64, )), x)
     tla.copy(tla.view(Y, (64, )), y)
     tla.copy(tla.view(C, (64, )), c)
@@ -36,12 +36,12 @@ def vaddcs_kernel(X, Y, C, M, D, B, T: tl.constexpr):
 
 @tla.jit
 def vsubcs_kernel(X, Y, C, M, D, B, T: tl.constexpr):
-    x = tla.alloc_buffer((64, ), T, space="ub")
-    y = tla.alloc_buffer((64, ), T, space="ub")
-    c = tla.alloc_buffer((64, ), tl.int32, space="ub")
-    m = tla.alloc_buffer((64, ), tl.int32, space="ub")
-    d = tla.alloc_buffer((64, ), T, space="ub")
-    b = tla.alloc_buffer((64, ), tl.int32, space="ub")
+    x = tla.alloc((64, ), T, space="ub")
+    y = tla.alloc((64, ), T, space="ub")
+    c = tla.alloc((64, ), tl.int32, space="ub")
+    m = tla.alloc((64, ), tl.int32, space="ub")
+    d = tla.alloc((64, ), T, space="ub")
+    b = tla.alloc((64, ), tl.int32, space="ub")
     tla.copy(tla.view(X, (64, )), x)
     tla.copy(tla.view(Y, (64, )), y)
     tla.copy(tla.view(C, (64, )), c)

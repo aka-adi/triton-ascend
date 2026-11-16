@@ -34,13 +34,13 @@ def group_kernel(X, M, O, DT: tl.constexpr, W: tl.constexpr, OP: tl.constexpr, M
                  MODE: tl.constexpr):
     N: tl.constexpr = 2048 // W
     MT: tl.constexpr = tl.int8 if W == 8 else (tl.int16 if W == 16 else tl.int32)
-    x = tla.alloc_buffer((N, ), DT, space="ub")
-    m = tla.alloc_buffer((N, ), MT, space="ub")
+    x = tla.alloc((N, ), DT, space="ub")
+    m = tla.alloc((N, ), MT, space="ub")
     WIDEN: tl.constexpr = OP == "add" and (DT == tl.int16 or DT == tl.uint16)
     OUT_DT: tl.constexpr = (tl.uint32 if DT == tl.uint16 else tl.int32) if WIDEN else DT
     OUT_N: tl.constexpr = 64 if WIDEN else N
     OW: tl.constexpr = 32 if WIDEN else W
-    out = tla.alloc_buffer((OUT_N, ), OUT_DT, space="ub")
+    out = tla.alloc((OUT_N, ), OUT_DT, space="ub")
     tla.copy(tla.view(X, (N, )), x)
     tla.copy(tla.view(M, (N, )), m)
     with tla.scope.simd():

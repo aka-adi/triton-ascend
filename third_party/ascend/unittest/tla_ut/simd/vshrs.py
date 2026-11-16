@@ -33,9 +33,9 @@ from utils.tla_test_utils import compile_offline, check_kernel_binary
 def shift_scalar(X, M, O, SHIFT, DT: tl.constexpr, W: tl.constexpr, DYNAMIC: tl.constexpr, MODE: tl.constexpr,
                  MASKED: tl.constexpr):
     N: tl.constexpr = 2048 // W
-    x = tla.alloc_buffer((N, ), DT, space="ub")
-    masks = tla.alloc_buffer((N, ), DT, space="ub")
-    out = tla.alloc_buffer((N, ), DT, space="ub")
+    x = tla.alloc((N, ), DT, space="ub")
+    masks = tla.alloc((N, ), DT, space="ub")
+    out = tla.alloc((N, ), DT, space="ub")
     tla.copy(tla.view(X, (N, )), x)
     tla.copy(tla.view(M, (N, )), masks)
     with tla.scope.simd():

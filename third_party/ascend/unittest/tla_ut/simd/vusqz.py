@@ -11,8 +11,8 @@ from utils.tla_test_utils import (compile_offline, get_stages, lower_offline, ch
 
 @tla.jit
 def vusqz_kernel(M, O, D: tl.constexpr, N: tl.constexpr, DIST: tl.constexpr):
-    m = tla.alloc_buffer((N, ), D, space="ub")
-    o = tla.alloc_buffer((N, ), D, space="ub")
+    m = tla.alloc((N, ), D, space="ub")
+    o = tla.alloc((N, ), D, space="ub")
     tla.copy(tla.view(M, (N, )), m)
     with tla.scope.simd():
         mask = tla.simd.vcmps(tla.simd.vlds(m[0]), 0, op=tla.simd.CMP.NE)

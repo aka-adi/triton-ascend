@@ -32,11 +32,11 @@ from utils.tla_test_utils import compile_offline, check_kernel_binary
 @tla.jit
 def memory_completion(X, I, M, D, O, DT: tl.constexpr, W: tl.constexpr, OP: tl.constexpr, BASE: tl.constexpr):
     N: tl.constexpr = 2048 // W
-    x = tla.alloc_buffer((1024, ), DT, space="ub")
-    i = tla.alloc_buffer((64, ), tl.uint32, space="ub")
-    m = tla.alloc_buffer((N, ), tl.int16 if W == 16 else tl.int32, space="ub")
-    dst = tla.alloc_buffer((1024, ), DT, space="ub")
-    out = tla.alloc_buffer((2, N), DT, space="ub")
+    x = tla.alloc((1024, ), DT, space="ub")
+    i = tla.alloc((64, ), tl.uint32, space="ub")
+    m = tla.alloc((N, ), tl.int16 if W == 16 else tl.int32, space="ub")
+    dst = tla.alloc((1024, ), DT, space="ub")
+    out = tla.alloc((2, N), DT, space="ub")
     tla.copy(tla.view(X, (1024, )), x)
     tla.copy(tla.view(I, (64, )), i)
     tla.copy(tla.view(M, (N, )), m)
@@ -136,9 +136,9 @@ def test_run(case, pattern, base):
 
 @tla.jit
 def scatter_alias(INIT, I, O, CHECK, OFFSET, STEPS, ALIAS: tl.constexpr):
-    buf = tla.alloc_buffer((256, ), tl.int32, space="ub")
-    indices = tla.alloc_buffer((64, ), tl.uint32, space="ub")
-    check = tla.alloc_buffer((2, 64), tl.int32, space="ub")
+    buf = tla.alloc((256, ), tl.int32, space="ub")
+    indices = tla.alloc((64, ), tl.uint32, space="ub")
+    check = tla.alloc((2, 64), tl.int32, space="ub")
     tla.copy(tla.view(INIT, (256, )), buf)
     tla.copy(tla.view(I, (64, )), indices)
     if ALIAS == "captured":

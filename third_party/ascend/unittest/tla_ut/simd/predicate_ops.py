@@ -34,9 +34,9 @@ def predicate_kernel(X, Y, O, W: tl.constexpr, OP: tl.constexpr, PART: tl.conste
     OW: tl.constexpr = (W // 2 if OP == "ppack" else (W * 2 if OP == "punpack" else W))
     ON: tl.constexpr = 2048 // OW
     DT: tl.constexpr = tl.int8 if OW == 8 else (tl.int16 if OW == 16 else tl.int32)
-    x = tla.alloc_buffer((32, ), tl.uint8, space="ub")
-    y = tla.alloc_buffer((32, ), tl.uint8, space="ub")
-    out = tla.alloc_buffer((2, ON), DT, space="ub")
+    x = tla.alloc((32, ), tl.uint8, space="ub")
+    y = tla.alloc((32, ), tl.uint8, space="ub")
+    out = tla.alloc((2, ON), DT, space="ub")
     tla.copy(tla.view(X, (32, )), x)
     tla.copy(tla.view(Y, (32, )), y)
     with tla.scope.simd():
@@ -138,7 +138,7 @@ def test_run(case, pattern):
 def pack_generated_kernel(O, W: tl.constexpr, COUNT: tl.constexpr):
     N: tl.constexpr = 2048 // W
     DT: tl.constexpr = tl.int8 if W == 16 else tl.int16
-    out = tla.alloc_buffer((2, 2 * N), DT, space="ub")
+    out = tla.alloc((2, 2 * N), DT, space="ub")
     with tla.scope.simd():
         p = tla.simd.pge(COUNT, N)
         lo = tla.simd.ppack(p, part=tla.simd.PART.LOWER)
@@ -176,9 +176,9 @@ def test_run_generated_pack(width, count):
 def predicate_roundtrip_kernel(X, Y, O, COUNT, W: tl.constexpr, PART: tl.constexpr):
     N: tl.constexpr = 2048 // W
     DT: tl.constexpr = tl.int8 if W == 8 else (tl.int16 if W == 16 else tl.int32)
-    x = tla.alloc_buffer((N, ), DT, space="ub")
-    y = tla.alloc_buffer((N, ), DT, space="ub")
-    out = tla.alloc_buffer((4, N), DT, space="ub")
+    x = tla.alloc((N, ), DT, space="ub")
+    y = tla.alloc((N, ), DT, space="ub")
+    out = tla.alloc((4, N), DT, space="ub")
     tla.copy(tla.view(X, (N, )), x)
     tla.copy(tla.view(Y, (N, )), y)
     with tla.scope.simd():

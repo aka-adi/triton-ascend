@@ -11,9 +11,9 @@ from utils.tla_test_utils import (compile_offline, get_stages, lower_offline, ch
 
 @tla.jit
 def vcpadd_kernel(X, M, O, D: tl.constexpr, I: tl.constexpr, N: tl.constexpr, DIST: tl.constexpr, MODE: tl.constexpr):
-    x = tla.alloc_buffer((N, ), D, space="ub")
-    m = tla.alloc_buffer((N, ), I, space="ub")
-    o = tla.alloc_buffer((N, ), D, space="ub")
+    x = tla.alloc((N, ), D, space="ub")
+    m = tla.alloc((N, ), I, space="ub")
+    o = tla.alloc((N, ), D, space="ub")
     tla.copy(tla.view(X, (N, )), x)
     tla.copy(tla.view(M, (N, )), m)
     with tla.scope.simd():
