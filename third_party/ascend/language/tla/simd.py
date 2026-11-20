@@ -93,6 +93,7 @@ pp/pge strings are validated by :mod:`simd_semantic`.
 from __future__ import annotations
 
 import enum
+import numbers
 
 import triton.language as tl
 from .core import buffer, buffer_access, vector, vector_type
@@ -1625,6 +1626,80 @@ def vsubcs(src0: vector, src1: vector, borrow: vector, mask: vector = None, _sem
     Inactive lanes return a zero difference and a false borrow-out.
     """
     return _ave_carry("vsubcs", src0, src1, borrow, mask, "vsubcs", _semantic)
+
+
+def _histv2_bin(bin):
+    """Normalize and validate the histogram bin window selector (0 or 1)."""
+    bin = _unwrap_if_constexpr(bin)
+    if isinstance(bin, bool) or not isinstance(bin, numbers.Integral):
+        raise TypeError(f"histogram bin must be the integer 0 or 1, got {bin!r}")
+    bin = int(bin)
+    if bin not in (0, 1):
+        raise ValueError(f"histogram bin must be 0 or 1, got {bin}")
+    return bin
+
+
+def _histv2(kind, acc, src, mask, bin, _semantic):
+    """Shared body of ``dhistv2``/``chistv2``.
+
+    ``acc`` holds the 128 current bin counters and is read, not modified: the
+    updated counters are returned, following the same value semantics as
+    :func:`vmula`. ``bin`` selects the 128-value window: 0 covers [0, 127],
+    1 covers [128, 255].
+    """
+    _require_vector(acc, "acc")
+    _require_vector(src, "src")
+    if _elem_tag(acc.dtype) != "i16":
+        raise TypeError(f"{kind}: acc must be a 16-bit integer vector, got {acc.dtype}")
+    if _elem_tag(src.dtype) != "i8":
+        raise TypeError(f"{kind}: src must be an 8-bit integer vector, got {src.dtype}")
+    if acc.type.lanes != 128:
+        raise ValueError(f"{kind}: acc must be a full 128-lane register")
+    if src.type.lanes != 256:
+        raise ValueError(f"{kind}: src must be a full 256-lane register")
+    mask = _mask_for(mask, 256, _semantic)
+    handle = _semantic.builder.create_simd_ave_histv2(kind, acc.handle, src.handle, mask.handle, _histv2_bin(bin))
+    return vector(handle, acc.type)
+
+
+@builtin
+def dhistv2(acc: vector, src: vector, mask: vector = None, bin: tl.constexpr = 0, _semantic=None) -> vector:
+    """Vector frequency histogram (``ave.hir.dhistv2``).
+
+    Returns the accumulator updated with the frequencies of one full register of
+    uint8 values: lane ``j`` becomes ``acc[j] + count(active src == 128 * bin + j)``.
+    Like the other accumulate ops the operand ``acc`` is only read, so chain the
+    result: ``acc = tla.simd.dhistv2(acc, src, mask, bin=0)``.
+
+    :param acc: uint16 accumulator register with 128 bin counters
+    :param src: uint8 full register (256 lanes)
+    :param mask: optional predicate with one lane per source element; defaults
+        to an all-true mask
+    :param bin: ``0`` histograms values in [0,127], ``1`` in [128,255]
+    :return: the updated accumulator
+    :rtype: tla.vector
+    """
+    return _histv2("dhistv2", acc, src, mask, bin, _semantic)
+
+
+@builtin
+def chistv2(acc: vector, src: vector, mask: vector = None, bin: tl.constexpr = 0, _semantic=None) -> vector:
+    """Vector cumulative histogram (``ave.hir.chistv2``).
+
+    Same operand contract as :func:`dhistv2`; lane ``j`` becomes
+    ``acc[j] + count(active src <= 128 * bin + j)``. The comparison is not
+    restricted to the selected window, so with ``bin = 1`` every source value
+    below 128 is counted in each of the 128 counters.
+
+    :param acc: uint16 accumulator register with 128 bin counters
+    :param src: uint8 full register (256 lanes)
+    :param mask: optional predicate with one lane per source element; defaults
+        to an all-true mask
+    :param bin: ``0`` uses thresholds in [0,127], ``1`` in [128,255]
+    :return: the updated accumulator
+    :rtype: tla.vector
+    """
+    return _histv2("chistv2", acc, src, mask, bin, _semantic)
 
 
 @builtin

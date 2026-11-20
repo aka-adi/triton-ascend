@@ -1043,6 +1043,47 @@ void init_tla_builder(py::module &&m) {
           },
           py::arg("vector"), py::arg("mask"), py::arg("kind"))
       .def(
+          "create_simd_ave_histv2",
+          [](TLABuilder &self, const std::string &kind, Value acc, Value src,
+             Value mask, int64_t bin) -> Value {
+            auto accTy = dyn_cast<VectorType>(acc.getType());
+            auto srcTy = dyn_cast<VectorType>(src.getType());
+            auto maskTy = dyn_cast<VectorType>(mask.getType());
+            if (!accTy || accTy.getRank() != 1 ||
+                !accTy.getElementType().isInteger(16) ||
+                accTy.getNumElements() != 128)
+              throw std::invalid_argument(
+                  "AVE histogram accumulator must be vector<128xi16>");
+            if (!srcTy || srcTy.getRank() != 1 ||
+                !srcTy.getElementType().isInteger(8) ||
+                srcTy.getNumElements() != 256)
+              throw std::invalid_argument(
+                  "AVE histogram source must be vector<256xi8>");
+            if (!maskTy || maskTy.getRank() != 1 ||
+                !maskTy.getElementType().isInteger(1) ||
+                maskTy.getNumElements() != 256)
+              throw std::invalid_argument(
+                  "AVE histogram mask must be vector<256xi1>");
+            if (bin != 0 && bin != 1)
+              throw std::invalid_argument("AVE histogram bin must be 0 or 1");
+            // The instruction writes back to the accumulator register, modelled
+            // like the other accumulate ops: `acc` is only read and the updated
+            // counters are the result, so the result type matches `acc`.
+            if (kind == "dhistv2")
+              return self
+                  .create<hivmave::DHistV2Op>(acc.getType(), acc, src, mask,
+                                              static_cast<uint32_t>(bin))
+                  .getRes();
+            if (kind == "chistv2")
+              return self
+                  .create<hivmave::CHistV2Op>(acc.getType(), acc, src, mask,
+                                              static_cast<uint32_t>(bin))
+                  .getRes();
+            throw std::invalid_argument("unknown AVE histogram kind: " + kind);
+          },
+          py::arg("kind"), py::arg("acc"), py::arg("src"), py::arg("mask"),
+          py::arg("bin"))
+      .def(
           "create_simd_ave_vcpadd",
           [](TLABuilder &self, Value src, Value mask) -> Value {
             auto resTy = src.getType();

@@ -106,6 +106,7 @@ def setup_unified_builder(main_builder, ascend_builder):
         'create_simd_vfma',
         'create_simd_vreduce',
         'create_simd_ave_vcpadd',
+        'create_simd_ave_histv2',
         'create_simd_ave_carry',
         'create_simd_ave_vsqz',
         'create_simd_ave_vusqz',
