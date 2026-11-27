@@ -93,6 +93,7 @@ pp/pge strings are validated by :mod:`simd_semantic`.
 from __future__ import annotations
 
 import enum
+import numbers
 
 import triton.language as tl
 from .core import buffer, buffer_access, vector, vector_type
@@ -168,6 +169,8 @@ __all__ = [
     "vcmp",
     "vpack",
     "vreduce_min",
+    "vbs",
+    "vmrgsort4",
     "vci",
     "membar",
     "ppack",
@@ -1658,6 +1661,80 @@ def vsubcs(src0: vector, src1: vector, borrow: vector, mask: vector = None, _sem
     Inactive lanes return a zero difference and a false borrow-out.
     """
     return _ave_carry("vsubcs", src0, src1, borrow, mask, "vsubcs", _semantic)
+
+
+def _histv2_bin(bin):
+    """Normalize and validate the histogram bin window selector (0 or 1)."""
+    bin = _unwrap_if_constexpr(bin)
+    if isinstance(bin, bool) or not isinstance(bin, numbers.Integral):
+        raise TypeError(f"histogram bin must be the integer 0 or 1, got {bin!r}")
+    bin = int(bin)
+    if bin not in (0, 1):
+        raise ValueError(f"histogram bin must be 0 or 1, got {bin}")
+    return bin
+
+
+def _histv2(kind, acc, src, mask, bin, _semantic):
+    """Shared body of ``dhistv2``/``chistv2``.
+
+    ``acc`` holds the 128 current bin counters and is read, not modified: the
+    updated counters are returned, following the same value semantics as
+    :func:`vmula`. ``bin`` selects the 128-value window: 0 covers [0, 127],
+    1 covers [128, 255].
+    """
+    _require_vector(acc, "acc")
+    _require_vector(src, "src")
+    if _elem_tag(acc.dtype) != "i16":
+        raise TypeError(f"{kind}: acc must be a 16-bit integer vector, got {acc.dtype}")
+    if _elem_tag(src.dtype) != "i8":
+        raise TypeError(f"{kind}: src must be an 8-bit integer vector, got {src.dtype}")
+    if acc.type.lanes != 128:
+        raise ValueError(f"{kind}: acc must be a full 128-lane register")
+    if src.type.lanes != 256:
+        raise ValueError(f"{kind}: src must be a full 256-lane register")
+    mask = _mask_for(mask, 256, _semantic)
+    handle = _semantic.builder.create_simd_ave_histv2(kind, acc.handle, src.handle, mask.handle, _histv2_bin(bin))
+    return vector(handle, acc.type)
+
+
+@builtin
+def dhistv2(acc: vector, src: vector, mask: vector = None, bin: tl.constexpr = 0, _semantic=None) -> vector:
+    """Vector frequency histogram (``ave.hir.dhistv2``).
+
+    Returns the accumulator updated with the frequencies of one full register of
+    uint8 values: lane ``j`` becomes ``acc[j] + count(active src == 128 * bin + j)``.
+    Like the other accumulate ops the operand ``acc`` is only read, so chain the
+    result: ``acc = tla.simd.dhistv2(acc, src, mask, bin=0)``.
+
+    :param acc: uint16 accumulator register with 128 bin counters
+    :param src: uint8 full register (256 lanes)
+    :param mask: optional predicate with one lane per source element; defaults
+        to an all-true mask
+    :param bin: ``0`` histograms values in [0,127], ``1`` in [128,255]
+    :return: the updated accumulator
+    :rtype: tla.vector
+    """
+    return _histv2("dhistv2", acc, src, mask, bin, _semantic)
+
+
+@builtin
+def chistv2(acc: vector, src: vector, mask: vector = None, bin: tl.constexpr = 0, _semantic=None) -> vector:
+    """Vector cumulative histogram (``ave.hir.chistv2``).
+
+    Same operand contract as :func:`dhistv2`; lane ``j`` becomes
+    ``acc[j] + count(active src <= 128 * bin + j)``. The comparison is not
+    restricted to the selected window, so with ``bin = 1`` every source value
+    below 128 is counted in each of the 128 counters.
+
+    :param acc: uint16 accumulator register with 128 bin counters
+    :param src: uint8 full register (256 lanes)
+    :param mask: optional predicate with one lane per source element; defaults
+        to an all-true mask
+    :param bin: ``0`` uses thresholds in [0,127], ``1`` in [128,255]
+    :return: the updated accumulator
+    :rtype: tla.vector
+    """
+    return _histv2("chistv2", acc, src, mask, bin, _semantic)
 
 
 @builtin
@@ -3210,6 +3287,72 @@ def vreduce_min(regs, _semantic=None) -> vector:
     and registers, broadcast to every lane.
     """
     return _reduce_across(regs, "min", _semantic)
+
+
+@builtin
+def vbs(scores, indices, dst, _semantic=None):
+    """Sort each group of 32 FP32 score/uint32 index pairs descending in UB.
+
+    ``scores`` holds N FP32 scores and ``indices`` N uint32 payload words;
+    ``dst`` receives 2*N uint32 words alternating the FP32 score *bits* and the
+    original payload.  N is a multiple of 32 in [32, 4096] -- not necessarily a
+    power of two, so the primitive only orders each 32-pair block; chain
+    :func:`vmrgsort4` to sort wider buffers.
+
+    Call inside a vector scope and outside a register SIMD scope (this is a
+    whole-UB instruction, not a VF op).  All three operands are contiguous
+    rank-one UB buffers.  ``dst`` must not overlap ``scores`` or ``indices``:
+    the frontend only sees distinct SSA values, which does *not* prove that
+    the underlying storage is disjoint, so non-aliasing is the caller's
+    responsibility.  UB bases and static offsets must be 32-byte aligned; base
+    alignment and the absence of unknown aliases are caller preconditions.
+    Contains no bounds or run-order checks beyond the shapes
+    above.  NaN scores are unsupported (a data precondition, not a frontend
+    check); equal scores may reorder (this is not a stable sort).  Returns
+    None; only ``dst`` is written and ``scores``/``indices`` are read.
+    """
+    from .sort import _check_scores
+
+    _check_scores(scores, indices, dst)
+    _semantic.builder.create_simd_vbs(scores.handle, indices.handle, dst.handle)
+
+
+@builtin
+def vmrgsort4(src, dst, run_size, _semantic=None):
+    """Merge adjacent descending runs of interleaved FP32-bits/uint32 pairs.
+
+    ``src`` and ``dst`` are equally sized contiguous rank-one UB uint32
+    buffers holding ``words`` interleaved words (FP32 score bits followed by
+    the opaque payload); both must be at most 8192 words and must not overlap.
+    A different SSA value is not proof of disjoint storage, so non-aliasing is
+    the caller's responsibility.  ``run_size`` is a compile-time int counting
+    pairs per already-sorted input run: it must be a multiple of 32 in
+    [32, words // 4] and divide the word count in half.  Each group merges
+    four runs, except that a final group of exactly two runs is allowed
+    (``runs == 2``); every other case needs a multiple of four runs.
+
+    Call inside a vector scope and outside a register SIMD scope.  The input
+    runs must already be sorted descending; that is a caller precondition, as
+    are NaN-free scores and 32-byte-aligned UB bases and static offsets.
+    Equal scores may reorder (not a stable merge).  Returns None; only
+    ``dst`` is written.
+    """
+    from .sort import _ub_vector
+
+    words = _ub_vector(src, "uint32")
+    if _ub_vector(dst, "uint32") != words:
+        raise ValueError("merge source and destination must hold the same number of words")
+    if words > 8192:
+        raise ValueError("merge buffers must hold at most 8192 words")
+    run = _unwrap_if_constexpr(run_size)
+    if type(run) is not int:
+        raise TypeError("run_size must be a compile-time int")
+    if not 32 <= run <= words // 4 or run % 32 or words % (2 * run):
+        raise ValueError("run_size must be a multiple of 32 in [32, words // 4] that divides the word count")
+    runs = words // (2 * run)
+    if runs != 2 and runs % 4:
+        raise ValueError("requires complete two-way or four-way merge groups")
+    _semantic.builder.create_simd_vmrgsort4(src.handle, dst.handle, run)
 
 
 @builtin

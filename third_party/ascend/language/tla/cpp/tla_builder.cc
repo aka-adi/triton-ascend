@@ -39,6 +39,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Region.h"
 #include "mlir/IR/Types.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 #include "mlir/Support/LLVM.h"
 #include "llvm/ADT/StringMap.h"
 
@@ -1130,6 +1131,47 @@ void init_tla_builder(py::module &&m) {
           },
           py::arg("vector"), py::arg("mask"), py::arg("kind"))
       .def(
+          "create_simd_ave_histv2",
+          [](TLABuilder &self, const std::string &kind, Value acc, Value src,
+             Value mask, int64_t bin) -> Value {
+            auto accTy = dyn_cast<VectorType>(acc.getType());
+            auto srcTy = dyn_cast<VectorType>(src.getType());
+            auto maskTy = dyn_cast<VectorType>(mask.getType());
+            if (!accTy || accTy.getRank() != 1 ||
+                !accTy.getElementType().isInteger(16) ||
+                accTy.getNumElements() != 128)
+              throw std::invalid_argument(
+                  "AVE histogram accumulator must be vector<128xi16>");
+            if (!srcTy || srcTy.getRank() != 1 ||
+                !srcTy.getElementType().isInteger(8) ||
+                srcTy.getNumElements() != 256)
+              throw std::invalid_argument(
+                  "AVE histogram source must be vector<256xi8>");
+            if (!maskTy || maskTy.getRank() != 1 ||
+                !maskTy.getElementType().isInteger(1) ||
+                maskTy.getNumElements() != 256)
+              throw std::invalid_argument(
+                  "AVE histogram mask must be vector<256xi1>");
+            if (bin != 0 && bin != 1)
+              throw std::invalid_argument("AVE histogram bin must be 0 or 1");
+            // The instruction writes back to the accumulator register, modelled
+            // like the other accumulate ops: `acc` is only read and the updated
+            // counters are the result, so the result type matches `acc`.
+            if (kind == "dhistv2")
+              return self
+                  .create<hivmave::VFDHistV2Op>(acc.getType(), acc, src, mask,
+                                                static_cast<uint32_t>(bin))
+                  .getRes();
+            if (kind == "chistv2")
+              return self
+                  .create<hivmave::VFCHistV2Op>(acc.getType(), acc, src, mask,
+                                                static_cast<uint32_t>(bin))
+                  .getRes();
+            throw std::invalid_argument("unknown AVE histogram kind: " + kind);
+          },
+          py::arg("kind"), py::arg("acc"), py::arg("src"), py::arg("mask"),
+          py::arg("bin"))
+      .def(
           "create_simd_ave_vcpadd",
           [](TLABuilder &self, Value src, Value mask) -> Value {
             auto resTy = src.getType();
@@ -1624,6 +1666,26 @@ void init_tla_builder(py::module &&m) {
                 hivm::AddressSpace::UB)
               throw std::invalid_argument(
                   "TLA fill requires a UB destination buffer");
+            // Static subview layouts are preserved for other APIs (notably
+            // sorting), but that must not silently broaden fill's contract.
+            // Inspect IR provenance rather than Python object metadata, which
+            // is not preserved when buffer values cross JIT boundaries.
+            Value origin = dst;
+            while (Operation *def = origin.getDefiningOp()) {
+              if (isa<memref::SubViewOp>(def))
+                throw std::invalid_argument(
+                    "tla.fill does not support subview-derived buffers yet "
+                    "(including offset 0)");
+              if (auto castOp = dyn_cast<memref::CastOp>(def)) {
+                origin = castOp.getSource();
+                continue;
+              }
+              if (auto view = dyn_cast<ViewLikeOpInterface>(def)) {
+                origin = view.getViewSource();
+                continue;
+              }
+              break;
+            }
             if (isa<ShapedType>(value.getType()))
               throw std::invalid_argument("TLA fill requires a scalar value");
             if (value.getType() != dstType.getElementType())
@@ -1633,6 +1695,37 @@ void init_tla_builder(py::module &&m) {
             self.create<hivm::VBrcOp>(TypeRange{}, value, dst);
           },
           py::arg("dst"), py::arg("value"))
+      .def("create_tla_sort_pairs",
+           [](TLABuilder &self, Value scores, Value indices, Value dst,
+              Value scratch) {
+             auto &builder = self.getBuilder();
+             if (enclosingCoreType(builder) != hivm::TCoreType::VECTOR)
+               throw std::invalid_argument("sort_pairs requires vector core");
+             Block *block = builder.getInsertionBlock();
+             for (Operation *op = block ? block->getParentOp() : nullptr; op;
+                  op = op->getParentOp()) {
+               if (op->hasAttr("hivm.vector_function") ||
+                   op->hasAttr("hivm.vf_mode") || op->hasAttr("vector_mode"))
+                 throw std::invalid_argument(
+                     "sort_pairs must be outside SIMD/SIMT scopes");
+             }
+             self.create<hivm::VSortPairsOp>(scores, indices, dst, scratch);
+           },
+           py::arg("scores"), py::arg("indices"), py::arg("dst"),
+           py::arg("scratch"))
+      .def(
+          "create_simd_vbs",
+          [](TLABuilder &self, Value scores, Value indices, Value dst) {
+            self.create<hivmave::VFSort32Op>(scores, indices, dst);
+          },
+          py::arg("scores"), py::arg("indices"), py::arg("dst"))
+      .def(
+          "create_simd_vmrgsort4",
+          [](TLABuilder &self, Value src, Value dst, int64_t runSize) {
+            self.create<hivmave::VFMergeSort4Op>(
+                src, dst, self.getBuilder().getI64IntegerAttr(runSize));
+          },
+          py::arg("src"), py::arg("dst"), py::arg("run_size"))
       .def("create_tla_pointer_view",
            [](TLABuilder &self, Value source, Value linear, Type resultType,
               const std::vector<py::object> &sizes,
@@ -1693,6 +1786,13 @@ void init_tla_builder(py::module &&m) {
                    "TLA subview operands must match memref rank");
              SmallVector<OpFoldResult> mixedOffsets, mixedSizes, mixedStrides;
              for (Value offset : offsets) {
+               if (auto constant = offset.getDefiningOp<arith::ConstantOp>()) {
+                 if (auto integer = dyn_cast<IntegerAttr>(constant.getValue())) {
+                   mixedOffsets.push_back(
+                       self.getBuilder().getIndexAttr(integer.getInt()));
+                   continue;
+                 }
+               }
                if (!offset.getType().isIndex())
                  offset = self.create<arith::IndexCastOp>(
                      self.getBuilder().getIndexType(), offset);

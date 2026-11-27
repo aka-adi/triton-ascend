@@ -75,6 +75,7 @@ from .core import AddressSpace, buffer, buffer_type, vector, vector_type
 from .scope import pipeline, scope
 from .alloc import alloc
 from .fill import fill
+from .sort import sort_pairs
 from .dma import (
     PadMode,
     L2CachePolicy,
@@ -210,6 +211,7 @@ __all__ = [
     # buffer alloc / view
     "alloc",
     "fill",
+    "sort_pairs",
     "view",
     "subview",
     "reshape",

@@ -91,7 +91,7 @@ def _subview(src, sizes, steps, offsets, semantic):
     # slices are rejected up front.
     static_view = not any(_is_dynamic(v) for v in offsets + sizes + steps)
     offset_handles, size_dims, step_dims = [], [], []
-    result_shape, result_strides = [], []
+    result_shape, result_strides, static_offsets = [], [], []
     for offset, size, step, extent, src_stride in zip(offsets, sizes, steps, src.shape, src.strides):
         offset = _check_scalar_int(offset)
         size = _check_dim(size, "sizes")
@@ -107,7 +107,19 @@ def _subview(src, sizes, steps, offsets, semantic):
         step_dims.append(_to_ir_dim(semantic, step))
         result_shape.append(None if _is_dynamic(size) else size)
         result_strides.append(None if (src_stride is None or _is_dynamic(step)) else src_stride * step)
-    ty = buffer_type(tuple(result_shape), src.dtype, src.space, tuple(result_strides), offset=None)
+        static_offsets.append(offset if type(offset) is int else None)
+    # Static per-dimension offsets fold into the result buffer offset so that
+    # consumers reasoning about origins (sorting, fill provenance) see the
+    # exact base.  A dynamic offset, or a dynamic source stride, keeps the
+    # result dynamic instead of guessing.  Only UB views fold: GM subviews keep
+    # ``offset=None`` so their pointer lowering and metadata stay exactly as
+    # main-dev defines them.  Sorting and fill are both UB-only, so folding a
+    # GM subview offset would widen our delta without buying any feature.
+    linear_offset = None
+    if (src.space == "ub" and src.offset is not None and all(type(off) is int for off in static_offsets)
+            and all(type(stride) is int for stride in src.strides)):
+        linear_offset = src.offset + sum(off * stride for off, stride in zip(static_offsets, src.strides))
+    ty = buffer_type(tuple(result_shape), src.dtype, src.space, tuple(result_strides), offset=linear_offset)
     handle = semantic.builder.create_tla_subview(src.handle, offset_handles, size_dims, step_dims)
     return buffer(handle, ty)
 

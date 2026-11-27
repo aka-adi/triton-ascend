@@ -19,9 +19,10 @@
 # THE SOFTWARE.
 """Host-only contract for ``tla.fill``.
 
-The recorder proves that every rejection happens before the builder call and
-that exactly one ``create_tla_fill`` is emitted for legal inputs.  It does not
-replace IR, compile or device checks; those live in ``fill.py``.
+The recorder checks Python type/layout validation and builder dispatch.
+Subview provenance is checked by the real C++ builder, not this recorder;
+``fill_subview.py`` tests that rejection and full-allocation acceptance in IR.
+These checks do not replace full compilation or device verification.
 """
 import importlib
 from pathlib import Path
@@ -183,3 +184,14 @@ def test_float_block_value_for_integer_destination_is_rejected():
     with pytest.raises(TypeError, match="must be a scalar|floating type"):
         fill_mod.fill(buf(dtype=tl.int32), block, _semantic=sem)
     assert sem.builder.calls == []
+
+
+def test_builder_provenance_rejection_is_not_swallowed():
+    class RejectingBuilder:
+        def create_tla_fill(self, dst, value):
+            raise ValueError("tla.fill does not support subview-derived buffers yet")
+
+    sem = Semantic()
+    sem.builder = RejectingBuilder()
+    with pytest.raises(ValueError, match="subview-derived"):
+        fill_mod.fill(buf(), 1, _semantic=sem)
