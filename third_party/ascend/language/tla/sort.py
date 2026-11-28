@@ -54,7 +54,9 @@ def _check_sort_pairs(scores, indices, dst, scratch):
     values = (scores, indices, dst, scratch)
     for name, value in zip(("scores", "indices", "dst", "scratch"), values):
         if type(value.offset) is not int or value.offset < 0 or value.offset % 8:
-            raise ValueError(f"tla.sort_pairs {name} requires a static nonnegative 32-byte-aligned offset")
+            raise ValueError(
+                f"tla.sort_pairs {name} requires a static nonnegative 32-byte-aligned offset; "
+                "subview offsets are not static yet and are not supported")
     for i, value in enumerate(values):
         if any(value.handle is prior.handle for prior in values[:i]):
             raise ValueError("tla.sort_pairs requires non-overlapping buffers")
@@ -69,9 +71,11 @@ def sort_pairs(scores, indices, dst, scratch, _semantic=None):
     contain 2*N uint32 words. N is a power of two in [32, 4096]. Output words
     alternate FP32 score *bits* and the original uint32 payload. All buffers
     must be contiguous UB buffers with a 32-byte-aligned base and offset,
-    and their accessed ranges must not overlap. Static aligned subviews are
-    supported; unknown/dynamic offsets are not. The caller must guarantee
-    base alignment and non-aliasing not provable from the views.
+    and their accessed ranges must not overlap. Only statically known offsets
+    are accepted; ``tla.subview`` results carry no static offset and are
+    currently rejected (whole allocations at offset 0 are supported). The
+    caller must guarantee base alignment and non-aliasing not provable from
+    the views.
 
     Invoke outside register SIMD/SIMT scopes, normally in
     ``with tla.scope.vector():``. NaN scores are unsupported (a runtime data

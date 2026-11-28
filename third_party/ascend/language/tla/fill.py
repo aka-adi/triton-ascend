@@ -28,11 +28,12 @@ rejected with the portable alternative instead of being silently lowered:
 * L0C -> ``tla.cube.mmad(..., clear_accum=True)``.
 * L1/L0A/L0B/BT/FB -> not part of this version.
 
-All subview-derived buffers remain unsupported for fill, including static
-zero-offset subviews and aliases/reshapes of them. The builder checks actual
-memref provenance; preserving static layout metadata does not enable new fill
-paths. Direct allocations and otherwise legal non-subview views retain their
-existing contract.
+Non-zero or dynamic subview offsets are also rejected: ``tla.subview`` records
+its result as ``offset=None`` even for a static slice, so ``tla.fill`` cannot
+tell a zero-offset alias from a shifted one.  Filling in that state could
+target the allocation origin instead of the requested region.  These cases
+need the offset carried through the buffer type and a lowering review before
+they can be enabled.
 """
 from triton.language.core import builtin, tensor, _unwrap_if_constexpr
 from .core import buffer, _row_major_strides
@@ -100,8 +101,7 @@ def fill(dst, value, _semantic=None):
 
     :param dst: UB destination buffer with a contiguous row-major layout and
         offset 0, as produced by :func:`tla.alloc` or a legal
-        :func:`tla.reshape` of it. Subview-derived buffers are rejected even
-        when their static offset is zero.
+        :func:`tla.reshape` of it.
     :type dst: tla.buffer
     :param value: Compile-time scalar or scalar tensor, converted to
         ``dst.dtype``.

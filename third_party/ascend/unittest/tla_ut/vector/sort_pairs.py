@@ -1,4 +1,4 @@
-"""Full UB sort_pairs: exact payload preservation, unstable ties, guards."""
+"""Full UB sort_pairs: exact payload preservation, unstable ties."""
 from collections import Counter
 import sys
 from pathlib import Path
@@ -13,28 +13,21 @@ from utils.tla_test_utils import compile_offline, lower_offline, get_stages, che
 
 SIZES = (32,64,128,256,512,1024,2048,4096)
 PATTERNS = ('random','ascending','descending','equal','duplicates','negative','extremes','infinity','signed_zero')
-GUARD = np.int32(0x51A7C0DE)
 
 @tla.jit
-def sort_kernel(S, I, O, W, SO, IO, N: tl.constexpr, PAD: tl.constexpr):
+def sort_kernel(S, I, O, W, SO, IO, N: tl.constexpr):
     with tla.scope.vector():
-        scores_full = tla.alloc((N + 2*PAD,), tl.float32)
-        indices_full = tla.alloc((N + 2*PAD,), tl.uint32)
-        dst_full = tla.alloc((2*N + 2*PAD,), tl.uint32)
-        scratch_full = tla.alloc((2*N + 2*PAD,), tl.uint32)
-        tla.load_gm_to_ub(tla.view(S, (N + 2*PAD,)), scores_full)
-        tla.load_gm_to_ub(tla.view(I, (N + 2*PAD,)), indices_full)
-        tla.load_gm_to_ub(tla.view(O, (2*N + 2*PAD,)), dst_full)
-        tla.load_gm_to_ub(tla.view(W, (2*N + 2*PAD,)), scratch_full)
-        scores = tla.subview(scores_full, (PAD,), (N,))
-        indices = tla.subview(indices_full, (PAD,), (N,))
-        dst = tla.subview(dst_full, (PAD,), (2*N,))
-        scratch = tla.subview(scratch_full, (PAD,), (2*N,))
+        scores = tla.alloc((N,), tl.float32)
+        indices = tla.alloc((N,), tl.uint32)
+        dst = tla.alloc((2*N,), tl.uint32)
+        scratch = tla.alloc((2*N,), tl.uint32)
+        tla.load_gm_to_ub(tla.view(S, (N,)), scores)
+        tla.load_gm_to_ub(tla.view(I, (N,)), indices)
         tla.sort_pairs(scores, indices, dst, scratch)
-        tla.store_ub_to_gm(dst_full, tla.view(O, (2*N + 2*PAD,)))
-        tla.store_ub_to_gm(scratch_full, tla.view(W, (2*N + 2*PAD,)))
-        tla.store_ub_to_gm(scores_full, tla.view(SO, (N + 2*PAD,)))
-        tla.store_ub_to_gm(indices_full, tla.view(IO, (N + 2*PAD,)))
+        tla.store_ub_to_gm(dst, tla.view(O, (2*N,)))
+        tla.store_ub_to_gm(scratch, tla.view(W, (2*N,)))
+        tla.store_ub_to_gm(scores, tla.view(SO, (N,)))
+        tla.store_ub_to_gm(indices, tla.view(IO, (N,)))
 
 
 def scores_for(n, pattern, seed):
@@ -61,33 +54,28 @@ def check_pairs(scores, payload, actual):
     assert Counter(map(tuple,pairs.tolist())) == expected, 'score/index bits changed'
 
 
-def launch(n, pad, pattern, seed, compile_only=False):
+def launch(n, pattern, seed, compile_only=False):
     scores = scores_for(n,pattern,seed)
     # Alternating high bits and distinct opaque payloads; never compare as keys.
     ids = (np.arange(n,dtype=np.uint32)*np.uint32(2654435761)+np.uint32(seed)).view(np.int32)
-    s = np.full(n+2*pad, GUARD, dtype=np.int32); s[pad:pad+n]=scores.view(np.int32)
-    i = np.full(n+2*pad, GUARD, dtype=np.int32); i[pad:pad+n]=ids
-    o = np.full(2*n+2*pad,GUARD,dtype=np.int32)
-    s_dev=torch.from_numpy(s.view(np.float32).copy()).npu()
-    i_dev=torch.from_numpy(i.copy()).npu()
-    out=torch.from_numpy(o.copy()).npu(); workspace=torch.from_numpy(o.copy()).npu()
+    s_dev=torch.from_numpy(scores.copy()).npu()
+    i_dev=torch.from_numpy(ids.copy()).npu()
+    out=torch.empty(2*n,dtype=torch.int32).npu()
+    workspace=torch.empty(2*n,dtype=torch.int32).npu()
     s_after=torch.empty_like(s_dev); i_after=torch.empty_like(i_dev)
     # uint32 UB buffers; torch keeps the same 32-bit words as signed int32.
     u32=lambda t: triton.reinterpret(t, tl.uint32)
     args=(s_dev,u32(i_dev),u32(out),u32(workspace),s_after,u32(i_after))
     if compile_only:
-        return sort_kernel.warmup(*args,N=n,PAD=pad,grid=(1,))
-    sort_kernel[(1,)](*args,N=n,PAD=pad)
+        return sort_kernel.warmup(*args,N=n,grid=(1,))
+    sort_kernel[(1,)](*args,N=n)
     torch.npu.synchronize()
-    actual=out.cpu().numpy(); temp=workspace.cpu().numpy()
-    check_pairs(scores,ids,actual[pad:pad+2*n])
-    if pad:
-        for value in (actual,temp):
-            assert np.all(value[:pad]==GUARD) and np.all(value[-pad:]==GUARD), 'guard overwritten'
-    np.testing.assert_array_equal(s_after.cpu().numpy().view(np.int32),s)
-    np.testing.assert_array_equal(i_after.cpu().numpy(),i)
-    np.testing.assert_array_equal(s_dev.cpu().numpy().view(np.int32),s)
-    np.testing.assert_array_equal(i_dev.cpu().numpy(),i)
+    actual=out.cpu().numpy()
+    check_pairs(scores,ids,actual)
+    np.testing.assert_array_equal(s_after.cpu().numpy().view(np.int32),scores.view(np.int32))
+    np.testing.assert_array_equal(i_after.cpu().numpy(),ids)
+    np.testing.assert_array_equal(s_dev.cpu().numpy().view(np.int32),scores.view(np.int32))
+    np.testing.assert_array_equal(i_dev.cpu().numpy(),ids)
 
 
 @tla.jit
@@ -124,13 +112,12 @@ def test_scope_rejections():
 def test_ir():
     signature={'S':'*fp32','I':'*u32','O':'*u32','W':'*u32','SO':'*fp32','IO':'*u32'}
     for n in SIZES:
-        for pad in (0,8):
-            mod,ctx=compile_offline(sort_kernel,signature,{'N':n,'PAD':pad})
-            text=str(mod)
-            assert 'hivm.hir.vsort_pairs' in text
-            assert 'hivm.vector_function' not in text
-            lower_offline(mod,ctx)
-    print('IR PASS: sort_pairs 8 sizes, zero/nonzero aligned subviews')
+        mod,ctx=compile_offline(sort_kernel,signature,{'N':n})
+        text=str(mod)
+        assert 'hivm.hir.vsort_pairs' in text
+        assert 'hivm.vector_function' not in text
+        lower_offline(mod,ctx)
+    print('IR PASS: sort_pairs 8 sizes at offset 0')
 
 
 def main():
@@ -139,15 +126,14 @@ def main():
         test_ir()
         test_scope_rejections()
     for n in SIZES:
-        for pad in (0,8):
-            if compile_:
-                check_kernel_binary(launch(n,pad,'random',0,True))
-                print('COMPILE PASS:',n,pad)
-            if run:
-                # Reuse each specialization with changing data, including repeated random launches.
-                for seed,pattern in enumerate(PATTERNS+('random',)):
-                    launch(n,pad,pattern,seed)
-                print('RUN PASS: sort_pairs',n,'offset',pad,'10 inputs, exact pairs and guards')
+        if compile_:
+            check_kernel_binary(launch(n,'random',0,True))
+            print('COMPILE PASS:',n)
+        if run:
+            # Reuse each specialization with changing data, including repeated random launches.
+            for seed,pattern in enumerate(PATTERNS+('random',)):
+                launch(n,pattern,seed)
+            print('RUN PASS: sort_pairs',n,'offset 0, 10 inputs, exact pairs')
     print('ALL PASS: sort_pairs')
 
 if __name__=='__main__': main()

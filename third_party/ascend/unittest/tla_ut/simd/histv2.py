@@ -345,7 +345,7 @@ def test_validation():
     for bad_bin in (True, 1.0):
         _expect_error(
             lambda bad_bin=bad_bin: compile_offline(histv2_kernel, MATRIX_SIGNATURE, _matrix_constexprs("d", bad_bin)),
-            "histogram bin must be the integer 0 or 1")
+            "histogram bin must be a compile-time integer 0 or 1")
     _expect_error(lambda: compile_offline(bad_acc_dtype_kernel, NEG_SIGNATURE, {"N": SRC_LANES}),
                   "acc must be a 16-bit integer vector")
     _expect_error(lambda: compile_offline(bad_src_dtype_kernel, NEG_SIGNATURE, {"N": SRC_LANES}),

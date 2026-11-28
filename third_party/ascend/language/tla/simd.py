@@ -93,7 +93,6 @@ pp/pge strings are validated by :mod:`simd_semantic`.
 from __future__ import annotations
 
 import enum
-import numbers
 
 import triton.language as tl
 from .core import buffer, buffer_access, vector, vector_type
@@ -1666,9 +1665,8 @@ def vsubcs(src0: vector, src1: vector, borrow: vector, mask: vector = None, _sem
 def _histv2_bin(bin):
     """Normalize and validate the histogram bin window selector (0 or 1)."""
     bin = _unwrap_if_constexpr(bin)
-    if isinstance(bin, bool) or not isinstance(bin, numbers.Integral):
-        raise TypeError(f"histogram bin must be the integer 0 or 1, got {bin!r}")
-    bin = int(bin)
+    if type(bin) is not int:
+        raise TypeError(f"histogram bin must be a compile-time integer 0 or 1, got {bin!r}")
     if bin not in (0, 1):
         raise ValueError(f"histogram bin must be 0 or 1, got {bin}")
     return bin

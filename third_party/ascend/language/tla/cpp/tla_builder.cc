@@ -39,7 +39,6 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Region.h"
 #include "mlir/IR/Types.h"
-#include "mlir/Interfaces/ViewLikeInterface.h"
 #include "mlir/Support/LLVM.h"
 #include "llvm/ADT/StringMap.h"
 
@@ -1134,29 +1133,11 @@ void init_tla_builder(py::module &&m) {
           "create_simd_ave_histv2",
           [](TLABuilder &self, const std::string &kind, Value acc, Value src,
              Value mask, int64_t bin) -> Value {
-            auto accTy = dyn_cast<VectorType>(acc.getType());
-            auto srcTy = dyn_cast<VectorType>(src.getType());
-            auto maskTy = dyn_cast<VectorType>(mask.getType());
-            if (!accTy || accTy.getRank() != 1 ||
-                !accTy.getElementType().isInteger(16) ||
-                accTy.getNumElements() != 128)
-              throw std::invalid_argument(
-                  "AVE histogram accumulator must be vector<128xi16>");
-            if (!srcTy || srcTy.getRank() != 1 ||
-                !srcTy.getElementType().isInteger(8) ||
-                srcTy.getNumElements() != 256)
-              throw std::invalid_argument(
-                  "AVE histogram source must be vector<256xi8>");
-            if (!maskTy || maskTy.getRank() != 1 ||
-                !maskTy.getElementType().isInteger(1) ||
-                maskTy.getNumElements() != 256)
-              throw std::invalid_argument(
-                  "AVE histogram mask must be vector<256xi1>");
-            if (bin != 0 && bin != 1)
-              throw std::invalid_argument("AVE histogram bin must be 0 or 1");
-            // The instruction writes back to the accumulator register, modelled
-            // like the other accumulate ops: `acc` is only read and the updated
-            // counters are the result, so the result type matches `acc`.
+            // Operand shapes and types, including the 0/1 bin selector, are
+            // validated by the Python frontend. The instruction writes back to
+            // the accumulator register, modelled like the other accumulate
+            // ops: `acc` is only read and the updated counters are the result,
+            // so the result type matches `acc`.
             if (kind == "dhistv2")
               return self
                   .create<hivmave::VFDHistV2Op>(acc.getType(), acc, src, mask,
@@ -1666,26 +1647,6 @@ void init_tla_builder(py::module &&m) {
                 hivm::AddressSpace::UB)
               throw std::invalid_argument(
                   "TLA fill requires a UB destination buffer");
-            // Static subview layouts are preserved for other APIs (notably
-            // sorting), but that must not silently broaden fill's contract.
-            // Inspect IR provenance rather than Python object metadata, which
-            // is not preserved when buffer values cross JIT boundaries.
-            Value origin = dst;
-            while (Operation *def = origin.getDefiningOp()) {
-              if (isa<memref::SubViewOp>(def))
-                throw std::invalid_argument(
-                    "tla.fill does not support subview-derived buffers yet "
-                    "(including offset 0)");
-              if (auto castOp = dyn_cast<memref::CastOp>(def)) {
-                origin = castOp.getSource();
-                continue;
-              }
-              if (auto view = dyn_cast<ViewLikeOpInterface>(def)) {
-                origin = view.getViewSource();
-                continue;
-              }
-              break;
-            }
             if (isa<ShapedType>(value.getType()))
               throw std::invalid_argument("TLA fill requires a scalar value");
             if (value.getType() != dstType.getElementType())
@@ -1786,13 +1747,6 @@ void init_tla_builder(py::module &&m) {
                    "TLA subview operands must match memref rank");
              SmallVector<OpFoldResult> mixedOffsets, mixedSizes, mixedStrides;
              for (Value offset : offsets) {
-               if (auto constant = offset.getDefiningOp<arith::ConstantOp>()) {
-                 if (auto integer = dyn_cast<IntegerAttr>(constant.getValue())) {
-                   mixedOffsets.push_back(
-                       self.getBuilder().getIndexAttr(integer.getInt()));
-                   continue;
-                 }
-               }
                if (!offset.getType().isIndex())
                  offset = self.create<arith::IndexCastOp>(
                      self.getBuilder().getIndexType(), offset);

@@ -108,7 +108,7 @@ def test_subview_preserves_pitch():
     sliced = view.subview(source, (0, 0), (8, 1040), _semantic=sem)
     assert sliced.shape == (8, 1040) and sliced.strides == (2064, 1)
     assert sliced.dtype == source.dtype and sliced.space == "ub"
-    assert sliced.offset == 0
+    assert sliced.offset is None
     assert sem.builder.calls[0][0] == "subview"
 
 
@@ -122,7 +122,6 @@ def test_relative_subview_strides():
     sem = Semantic()
     sliced = view.subview(source, (1, 2), (4, 8), (2, 1), _semantic=sem)
     assert sliced.strides == (64, 1)
-    assert sliced.offset == 98
     call = sem.builder.calls[0]
     assert call[1] is source.handle
     assert [x.value for x in call[2]] == [1, 2]
@@ -135,9 +134,9 @@ def test_compact_prefix_uses_subview_and_reshape():
     prefix = view.subview(flat, (0, ), (8320, ), _semantic=sem)
     compact = view.reshape(prefix, (8, 1040), _semantic=sem)
     assert compact.shape == (8, 1040) and compact.strides == (1040, 1)
-    assert compact.offset == 0
+    assert compact.offset is None
     assert [c[0] for c in sem.builder.calls] == ["collapse", "subview", "expand"]
-    assert sem.builder.calls[-1][2] == ((8, 1040), "bf16", "ub", (1040, 1), 0)
+    assert sem.builder.calls[-1][2] == ((8, 1040), "bf16", "ub", (1040, 1), None)
 
 
 @pytest.mark.parametrize("offset", [0, 128, None])
@@ -255,14 +254,3 @@ def test_reshape_rejects_non_contiguous_slices(shape, strides):
 def test_reshape_rejects_element_count_change():
     with pytest.raises(ValueError, match="element count mismatch"):
         view.reshape(buf((8320, ), offset=None), (8, 2064), _semantic=Semantic())
-
-
-def test_nested_static_subview_offset():
-    first = view.subview(buf((128,), offset=16), (8,), (64,), _semantic=Semantic())
-    second = view.subview(first, (8,), (32,), _semantic=Semantic())
-    assert first.offset == 24 and second.offset == 32
-
-
-def test_static_subview_of_dynamic_base_stays_dynamic():
-    result = view.subview(buf((128,), offset=None), (8,), (32,), _semantic=Semantic())
-    assert result.offset is None

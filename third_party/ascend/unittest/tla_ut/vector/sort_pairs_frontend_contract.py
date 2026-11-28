@@ -11,10 +11,16 @@ pkg.__path__ = [str(Path(__file__).resolve().parents[3] / 'language' / 'tla')]
 sys.modules.setdefault('sort_tla_src', pkg)
 sort = importlib.import_module('sort_tla_src.sort')
 core = importlib.import_module('sort_tla_src.core')
+view = importlib.import_module('sort_tla_src.view')
 
 class Recorder:
     def __init__(self): self.calls = []
     def create_tla_sort_pairs(self, *args): self.calls.append(args)
+    def create_tla_subview(self, *args): return object()
+
+class Semantic:
+    def __init__(self): self.builder = Recorder()
+    def to_tensor(self, value): return types.SimpleNamespace(handle=value)
 
 def buf(n, dtype, **kw):
     return core.buffer(object(), core.buffer_type((n,), dtype, **kw))
@@ -26,9 +32,8 @@ def inputs(n=32, offset=0):
             buf(2*n, tl.uint32, space='ub', offset=offset)]
 
 @pytest.mark.parametrize('n', [32,64,128,256,512,1024,2048,4096])
-@pytest.mark.parametrize('offset', [0,8,16])
-def test_legal(n, offset):
-    args = inputs(n, offset)
+def test_legal(n):
+    args = inputs(n)
     sem = types.SimpleNamespace(builder=Recorder())
     assert sort.sort_pairs(*args, _semantic=sem) is None
     assert sem.builder.calls == [tuple(x.handle for x in args)]
@@ -62,3 +67,12 @@ def test_bad_payload_dtype_and_shape(slot):
 def test_same_handle():
     args=inputs();args[3]=args[2]
     with pytest.raises(ValueError,match='non-overlapping'): sort._check_sort_pairs(*args)
+
+def test_subview_is_rejected():
+    sem = Semantic()
+    sliced = view.subview(buf(64, tl.float32, space='ub'), (8,), (32,), _semantic=sem)
+    assert sliced.offset is None
+    args = inputs()
+    args[0] = sliced
+    with pytest.raises(ValueError, match='static nonnegative'):
+        sort.sort_pairs(*args, _semantic=types.SimpleNamespace(builder=Recorder()))
